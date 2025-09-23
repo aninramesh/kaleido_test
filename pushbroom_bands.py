@@ -363,7 +363,7 @@ def create_aligned_pushbroom_image(band_data_list, band_name, shifts_list, fps_p
             # Extract new pushbroom data using Y-shift to define new content region
             band_data = band_data_list[i]
             new_data = extract_new_pushbroom_data(
-                band_data, x_shift, y_shift, reference_width
+                band_data, cumulative_x_shift, y_shift, reference_width
             )
             
             # Append to the beginning of the pushbroom (newer images at top)
@@ -407,6 +407,13 @@ def create_shift_metrics_plot(shifts_list, correlations_list, rmse_list, combine
     rmse_values = rmse_list
     combined_scores = combined_scores_list
     
+    # Calculate cumulative X-shifts
+    cumulative_x_shifts = []
+    cumulative_x = 0
+    for x_shift in x_shifts:
+        cumulative_x += x_shift
+        cumulative_x_shifts.append(cumulative_x)
+    
     # Normalize RMSE for plotting (0-1 scale, inverted so higher is better)
     rmse_array = np.array(rmse_values)
     if rmse_array.max() > rmse_array.min():
@@ -421,8 +428,9 @@ def create_shift_metrics_plot(shifts_list, correlations_list, rmse_list, combine
     fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 10))
     fig.suptitle(f'Shift Metrics Analysis for {num_images} Images', fontsize=16, fontweight='bold')
     
-    # Plot 1: X and Y shifts
-    ax1.plot(pair_indices, x_shifts, 'bo-', label='X Shift', linewidth=2, markersize=8)
+    # Plot 1: X and Y shifts (individual and cumulative X)
+    ax1.plot(pair_indices, x_shifts, 'bo-', label='X Shift (individual)', linewidth=2, markersize=8)
+    ax1.plot(pair_indices, cumulative_x_shifts, 'co-', label='X Shift (cumulative)', linewidth=2, markersize=8)
     ax1.plot(pair_indices, y_shifts, 'ro-', label='Y Shift', linewidth=2, markersize=8)
     ax1.set_xlabel('Image Pair Index')
     ax1.set_ylabel('Shift (pixels)')
