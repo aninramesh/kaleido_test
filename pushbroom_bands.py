@@ -68,6 +68,7 @@ def extract_bands(image_data):
     
     return bands
 
+
 def create_pushbroom_image(band_data_list, band_name, fps_pixels=25):
     """
     Create a pushbroom image by stitching band images sequentially.
@@ -101,6 +102,7 @@ def create_pushbroom_image(band_data_list, band_name, fps_pixels=25):
             # If image is smaller than fps_pixels, use all pixels
             selected_pixels = band_data
         
+        
         # Append to the end of the pushbroom
         pushbroom = np.vstack([selected_pixels, pushbroom])
     
@@ -124,82 +126,7 @@ def save_10bit_tiff(img_array, output_path):
     Image.fromarray(img_16bit).save(output_path)
     print(f"  Saved: {output_path}")
 
-def create_rgb_image(band_data_lists, fps_pixels=25):
-    """
-    Create RGB pushbroom images from the spectral bands.
-    Uses Red, Green-pan, and Blue bands for RGB composition.
-    
-    Args:
-        band_data_lists (dict): Dictionary containing band data for each band
-        fps_pixels (int): Number of pixels per second
-        
-    Returns:
-        dict: Dictionary containing RGB pushbroom images
-    """
-    rgb_images = {}
-    
-    # Check if we have the required bands
-    required_bands = ['red', 'green_pan', 'blue']
-    if not all(band in band_data_lists for band in required_bands):
-        print("Warning: Missing required bands for RGB creation")
-        return rgb_images
-    
-    print("\nCreating RGB pushbroom images...")
-    
-    # Create RGB pushbroom for each band combination
-    for band_name in required_bands:
-        if band_data_lists[band_name]:
-            print(f"\nCreating RGB pushbroom for {band_name} band...")
-            
-            # Create pushbroom image for this band
-            pushbroom = create_pushbroom_image(band_data_lists[band_name], f"rgb_{band_name}", fps_pixels)
-            
-            if pushbroom is not None:
-                rgb_images[band_name] = pushbroom
-                print(f"  RGB {band_name} pushbroom: shape {pushbroom.shape}")
-    
-    # Create composite RGB image using all three bands
-    if len(rgb_images) == 3:
-        print(f"\nCreating composite RGB pushbroom...")
-        
-        # Get the minimum height to ensure all bands have the same dimensions
-        min_height = min(img.shape[0] for img in rgb_images.values())
-        
-        # Resize all bands to the same height
-        resized_bands = {}
-        for band_name, img in rgb_images.items():
-            if img.shape[0] > min_height:
-                # Take the first min_height rows
-                resized_bands[band_name] = img[:min_height, :]
-            else:
-                resized_bands[band_name] = img
-        
-        # Create RGB composite (Red, Green, Blue)
-        rgb_composite = np.stack([
-            resized_bands['red'],
-            resized_bands['green_pan'], 
-            resized_bands['blue']
-        ], axis=2)
-        
-        print(f"  RGB composite shape: {rgb_composite.shape}")
-        rgb_images['composite'] = rgb_composite
-    
-    return rgb_images
 
-def save_rgb_image(rgb_array, output_path):
-    """
-    Save RGB image as 8-bit PNG for display.
-    
-    Args:
-        rgb_array (numpy.ndarray): RGB image data (0-1023 range)
-        output_path (str): Output file path
-    """
-    # Scale from 10-bit (0-1023) to 8-bit (0-255)
-    rgb_8bit = (rgb_array / 1023.0 * 255).astype(np.uint8)
-    
-    # Save as PNG
-    Image.fromarray(rgb_8bit).save(output_path)
-    print(f"  Saved RGB: {output_path}")
 
 def main():
     """Main function to process images and create pushbroom bands."""
@@ -278,7 +205,7 @@ def main():
             
             if pushbroom is not None:
                 # Save pushbroom image
-                output_path = f"pushbroom_{band_name}_{num_images}images_{fps_pixels}fps.tiff"
+                output_path = f"pushbroom_{band_name}_{num_images}images_{fps_pixels}pxsec.tiff"
                 save_10bit_tiff(pushbroom, output_path)
                 
                 # Also save individual band from first image for reference
@@ -288,27 +215,8 @@ def main():
         else:
             print(f"No data available for {band_name} band")
     
-    # Create RGB pushbroom images
-    rgb_images = create_rgb_image(band_data_lists, fps_pixels)
-    
-    # Save RGB images
-    if rgb_images:
-        print(f"\nSaving RGB pushbroom images...")
-        
-        for rgb_name, rgb_array in rgb_images.items():
-            if rgb_name == 'composite':
-                # Save composite RGB as PNG for display
-                output_path = f"pushbroom_rgb_composite_{num_images}images_{fps_pixels}fps.png"
-                save_rgb_image(rgb_array, output_path)
-            else:
-                # Save individual RGB bands as TIFF
-                output_path = f"pushbroom_rgb_{rgb_name}_{num_images}images_{fps_pixels}fps.tiff"
-                save_10bit_tiff(rgb_array, output_path)
-    
     print(f"\nPushbroom processing complete!")
     print(f"Created pushbroom images for {num_images} images using {fps_pixels} pixels per second")
-    if rgb_images:
-        print(f"Created RGB pushbroom images including composite RGB")
 
 if __name__ == "__main__":
     main()
