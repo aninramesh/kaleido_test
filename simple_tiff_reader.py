@@ -251,8 +251,8 @@ def save_as_10bit_tiff(img_array, output_path="converted_10bit.tiff"):
 # Example usage
 if __name__ == "__main__":
     # Read the specific GeoTIFF file you have open
-    file_path = "IPS_Dataset/image_003808.tiff"
-    file_path2 = "IPS_Dataset/image_003809.tiff"  # Alternative extension
+    file_path = "IPS_Dataset/image_003713.tiff"
+    file_path2 = "IPS_Dataset/image_003714.tiff"  # Alternative extension
     
     try:
         # Read the 10-bit GeoTIFF
@@ -284,8 +284,8 @@ if __name__ == "__main__":
         
         best_x, best_y, max_corr, corr_map = calculate_autocorrelation(
             green_pan1, green_pan2, 
-            x_range=(-6, 6), 
-            y_range=(26, 39)
+            x_range=(-7, 7), 
+            y_range=(20, 38)
         )
 
         # Get aligned image regions (using green_pan bands)
@@ -302,18 +302,18 @@ if __name__ == "__main__":
         ax1.set_ylabel('Y Shift (pixels)')
 
         # Set axis labels to show actual shift values
-        x_ticks = range(len(range(-6, 6)))
-        y_ticks = range(len(range(26, 39)))
+        x_ticks = range(len(range(-7, 7)))
+        y_ticks = range(len(range(20, 39)))
         ax1.set_xticks(x_ticks)
-        ax1.set_xticklabels(range(-6, 6))
+        ax1.set_xticklabels(range(-7, 7))
         ax1.set_yticks(y_ticks)
-        ax1.set_yticklabels(range(26, 39))
+        ax1.set_yticklabels(range(20, 39))
 
         plt.colorbar(im1, ax=ax1, label='Correlation')
         
         # Mark the best correlation point
-        best_x_idx = best_x - (-6)  # Convert to index
-        best_y_idx = best_y - 26
+        best_x_idx = best_x - (-7)  # Convert to index
+        best_y_idx = best_y - 20
         ax1.plot(best_x_idx, best_y_idx, 'ro', markersize=15, markeredgecolor='white', markeredgewidth=2, label=f'Best Match ({best_x}, {best_y})')
         ax1.legend()
         

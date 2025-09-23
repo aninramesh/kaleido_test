@@ -70,9 +70,9 @@ def extract_bands(image_data):
     return bands
 
 
-def calculate_autocorrelation(img1, img2, x_range=(-6, 6), y_range=(26, 39)):
+def calculate_autocorrelation_with_rmse(img1, img2, x_range=(-6, 6), y_range=(26, 39)):
     """
-    Calculate autocorrelation between two images within specified shift ranges.
+    Calculate combined metric using both autocorrelation and RMSE for finding best shift.
     Positive y_shift means img2 is shifted UP relative to img1.
     Positive x_shift means img2 is shifted right relative to img1.
     
@@ -83,9 +83,9 @@ def calculate_autocorrelation(img1, img2, x_range=(-6, 6), y_range=(26, 39)):
         y_range (tuple): Range of y-axis shifts to test (min, max) - positive values
         
     Returns:
-        tuple: (best_x_shift, best_y_shift, max_correlation)
+        tuple: (best_x_shift, best_y_shift, max_correlation, min_rmse, best_combined_score)
     """
-    print(f"    Calculating autocorrelation...")
+    print(f"    Calculating autocorrelation + RMSE...")
     print(f"    X shift range: {x_range[0]} to {x_range[1]} pixels")
     print(f"    Y shift range: {y_range[0]} to {y_range[1]} pixels")
     
@@ -93,17 +93,17 @@ def calculate_autocorrelation(img1, img2, x_range=(-6, 6), y_range=(26, 39)):
     img1_float = img1.astype(np.float32)
     img2_float = img2.astype(np.float32)
     
-    # Normalize images to have zero mean and unit variance
+    # Normalize images to have zero mean and unit variance for correlation
     img1_norm = (img1_float - np.mean(img1_float)) / np.std(img1_float)
     img2_norm = (img2_float - np.mean(img2_float)) / np.std(img2_float)
     
-    # Initialize correlation tracking
+    # Initialize tracking
     x_shifts = range(x_range[0], x_range[1] + 1)
     y_shifts = range(y_range[0], y_range[1] + 1)
     
-    best_correlation = -np.inf
-    best_x_shift = 0
-    best_y_shift = 0
+    correlations = []
+    rmse_values = []
+    shift_coords = []
     
     # Test each shift combination
     for y_shift in y_shifts:
@@ -130,36 +130,76 @@ def calculate_autocorrelation(img1, img2, x_range=(-6, 6), y_range=(26, 39)):
             if (y1_end > y1_start and x1_end > x1_start and 
                 y2_end > y2_start and x2_end > x2_start):
                 
-                region1 = img1_norm[y1_start:y1_end, x1_start:x1_end]
-                region2 = img2_norm[y2_start:y2_end, x2_start:x2_end]
+                # For correlation: use normalized regions
+                region1_norm = img1_norm[y1_start:y1_end, x1_start:x1_end]
+                region2_norm = img2_norm[y2_start:y2_end, x2_start:x2_end]
+                
+                # For RMSE: use original intensity regions
+                region1_orig = img1_float[y1_start:y1_end, x1_start:x1_end]
+                region2_orig = img2_float[y2_start:y2_end, x2_start:x2_end]
                 
                 # Ensure regions have the same size
-                min_h = min(region1.shape[0], region2.shape[0])
-                min_w = min(region1.shape[1], region2.shape[1])
+                min_h = min(region1_norm.shape[0], region2_norm.shape[0])
+                min_w = min(region1_norm.shape[1], region2_norm.shape[1])
                 
-                region1 = region1[:min_h, :min_w]
-                region2 = region2[:min_h, :min_w]
+                region1_norm = region1_norm[:min_h, :min_w]
+                region2_norm = region2_norm[:min_h, :min_w]
+                region1_orig = region1_orig[:min_h, :min_w]
+                region2_orig = region2_orig[:min_h, :min_w]
                 
-                # Calculate normalized cross-correlation
-                if region1.size > 0 and region2.size > 0:
-                    mean1 = np.mean(region1)
-                    mean2 = np.mean(region2)
-                    std1 = np.std(region1)
-                    std2 = np.std(region2)
+                # Calculate metrics if regions are valid
+                if region1_norm.size > 0 and region2_norm.size > 0:
+                    # Calculate normalized cross-correlation
+                    mean1 = np.mean(region1_norm)
+                    mean2 = np.mean(region2_norm)
+                    std1 = np.std(region1_norm)
+                    std2 = np.std(region2_norm)
                     
                     if std1 > 0 and std2 > 0:
-                        correlation = np.mean((region1 - mean1) * (region2 - mean2)) / (std1 * std2)
+                        correlation = np.mean((region1_norm - mean1) * (region2_norm - mean2)) / (std1 * std2)
                     else:
                         correlation = 0
                     
-                    if correlation > best_correlation:
-                        best_correlation = correlation
-                        best_x_shift = x_shift
-                        best_y_shift = y_shift
+                    # Calculate RMSE on original intensity values
+                    rmse = np.sqrt(np.mean((region1_orig - region2_orig) ** 2))
+                    
+                    correlations.append(correlation)
+                    rmse_values.append(rmse)
+                    shift_coords.append((x_shift, y_shift))
     
-    print(f"    Best match: X={best_x_shift}, Y={best_y_shift}, Correlation={best_correlation:.4f}")
-    
-    return best_x_shift, best_y_shift, best_correlation
+    # Normalize metrics for combination
+    if len(correlations) > 0:
+        correlations = np.array(correlations)
+        rmse_values = np.array(rmse_values)
+        
+        # Normalize correlation to [0, 1] (correlation is already in [-1, 1])
+        norm_correlation = (correlations + 1) / 2.0  # Now in [0, 1]
+        
+        # Normalize RMSE to [0, 1] and invert (lower RMSE is better)
+        if rmse_values.max() > rmse_values.min():
+            norm_rmse_inverted = 1.0 - (rmse_values - rmse_values.min()) / (rmse_values.max() - rmse_values.min())
+        else:
+            norm_rmse_inverted = np.ones_like(rmse_values)  # All RMSE values are the same
+        
+        # Combined score: weighted combination (you can adjust weights)
+        alpha = 0.7  # Weight for correlation
+        beta = 0.3   # Weight for RMSE
+        combined_scores = alpha * norm_correlation + beta * norm_rmse_inverted
+        
+        # Find best shift
+        best_idx = np.argmax(combined_scores)
+        best_x_shift, best_y_shift = shift_coords[best_idx]
+        best_correlation = correlations[best_idx]
+        best_rmse = rmse_values[best_idx]
+        best_combined_score = combined_scores[best_idx]
+        
+        print(f"    Best match: X={best_x_shift}, Y={best_y_shift}")
+        print(f"    Correlation={best_correlation:.4f}, RMSE={best_rmse:.2f}, Combined={best_combined_score:.4f}")
+        
+        return best_x_shift, best_y_shift, best_correlation, best_rmse, best_combined_score
+    else:
+        print(f"    No valid overlapping regions found!")
+        return 0, 0, 0, float('inf'), 0
 
 
 def extract_new_pushbroom_data(band_data, x_shift, y_shift, reference_width):
@@ -333,6 +373,107 @@ def create_aligned_pushbroom_image(band_data_list, band_name, shifts_list, fps_p
     return pushbroom
 
 
+def create_shift_metrics_plot(shifts_list, correlations_list, rmse_list, combined_scores_list, num_images):
+    """
+    Create a visualization showing shift parameters and metrics as a function of image index.
+    
+    Args:
+        shifts_list (list): List of (x_shift, y_shift) tuples
+        correlations_list (list): List of correlation values
+        rmse_list (list): List of RMSE values
+        combined_scores_list (list): List of combined scores
+        num_images (int): Total number of images processed
+    """
+    print(f"\nCreating shift metrics visualization...")
+    
+    if len(shifts_list) == 0:
+        print("  No shift data to plot")
+        return
+    
+    # Extract data for plotting
+    x_shifts = [shift[0] for shift in shifts_list]
+    y_shifts = [shift[1] for shift in shifts_list]
+    correlations = correlations_list
+    rmse_values = rmse_list
+    combined_scores = combined_scores_list
+    
+    # Normalize RMSE for plotting (0-1 scale, inverted so higher is better)
+    rmse_array = np.array(rmse_values)
+    if rmse_array.max() > rmse_array.min():
+        normalized_rmse = 1.0 - (rmse_array - rmse_array.min()) / (rmse_array.max() - rmse_array.min())
+    else:
+        normalized_rmse = np.ones_like(rmse_array)
+    
+    # Image pair indices (1->2, 2->3, etc.)
+    pair_indices = list(range(1, len(shifts_list) + 1))
+    
+    # Create the plot
+    fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 10))
+    fig.suptitle(f'Shift Metrics Analysis for {num_images} Images', fontsize=16, fontweight='bold')
+    
+    # Plot 1: X and Y shifts
+    ax1.plot(pair_indices, x_shifts, 'bo-', label='X Shift', linewidth=2, markersize=8)
+    ax1.plot(pair_indices, y_shifts, 'ro-', label='Y Shift', linewidth=2, markersize=8)
+    ax1.set_xlabel('Image Pair Index')
+    ax1.set_ylabel('Shift (pixels)')
+    ax1.set_title('X and Y Shifts Between Consecutive Images')
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
+    ax1.set_xticks(pair_indices)
+    
+    # Plot 2: Correlation values
+    ax2.plot(pair_indices, correlations, 'go-', linewidth=2, markersize=8)
+    ax2.set_xlabel('Image Pair Index')
+    ax2.set_ylabel('Correlation Coefficient')
+    ax2.set_title('Cross-Correlation Between Consecutive Images')
+    ax2.grid(True, alpha=0.3)
+    ax2.set_xticks(pair_indices)
+    ax2.set_ylim([0, 1])
+    
+    # Add correlation values as text annotations
+    for i, corr in enumerate(correlations):
+        ax2.annotate(f'{corr:.3f}', (pair_indices[i], corr), 
+                    textcoords="offset points", xytext=(0,10), ha='center')
+    
+    # Plot 3: Normalized RMSE (inverted, so higher is better)
+    ax3.plot(pair_indices, normalized_rmse, 'mo-', linewidth=2, markersize=8)
+    ax3.set_xlabel('Image Pair Index')
+    ax3.set_ylabel('Normalized RMSE (inverted)')
+    ax3.set_title('Normalized RMSE Between Consecutive Images')
+    ax3.grid(True, alpha=0.3)
+    ax3.set_xticks(pair_indices)
+    ax3.set_ylim([0, 1])
+    
+    # Add RMSE values as text annotations
+    for i, (norm_rmse, raw_rmse) in enumerate(zip(normalized_rmse, rmse_values)):
+        ax3.annotate(f'{raw_rmse:.1f}', (pair_indices[i], norm_rmse), 
+                    textcoords="offset points", xytext=(0,10), ha='center')
+    
+    # Plot 4: Combined scores
+    ax4.plot(pair_indices, combined_scores, 'co-', linewidth=2, markersize=8)
+    ax4.set_xlabel('Image Pair Index')
+    ax4.set_ylabel('Combined Score')
+    ax4.set_title('Combined Metric (0.7×Correlation + 0.3×Norm_RMSE)')
+    ax4.grid(True, alpha=0.3)
+    ax4.set_xticks(pair_indices)
+    ax4.set_ylim([0, 1])
+    
+    # Add combined scores as text annotations
+    for i, score in enumerate(combined_scores):
+        ax4.annotate(f'{score:.3f}', (pair_indices[i], score), 
+                    textcoords="offset points", xytext=(0,10), ha='center')
+    
+    plt.tight_layout()
+    
+    # Save the plot
+    plot_filename = f"shift_metrics_analysis_{num_images}images.png"
+    plt.savefig(plot_filename, dpi=300, bbox_inches='tight')
+    print(f"  Saved plot: {plot_filename}")
+    
+    # Show the plot
+    plt.show()
+
+
 def save_10bit_tiff(img_array, output_path):
     """
     Save 10-bit image data as TIFF preserving the 10-bit range.
@@ -419,6 +560,9 @@ def main():
     # Calculate shifts between consecutive images using green_pan band
     print(f"\nCalculating autocorrelation shifts between consecutive images...")
     shifts_list = []
+    correlations_list = []
+    rmse_list = []
+    combined_scores_list = []
     
     if len(band_data_lists['green_pan']) >= 2:
         for i in range(len(band_data_lists['green_pan']) - 1):
@@ -426,17 +570,26 @@ def main():
             green_pan_1 = band_data_lists['green_pan'][i]
             green_pan_2 = band_data_lists['green_pan'][i+1]
             
-            # Calculate autocorrelation shift
-            x_shift, y_shift, correlation = calculate_autocorrelation(
+            # Calculate autocorrelation + RMSE combined shift
+            x_shift, y_shift, correlation, rmse, combined_score = calculate_autocorrelation_with_rmse(
                 green_pan_1, green_pan_2, 
-                x_range=(-6, 6), 
-                y_range=(26, 39)
+                x_range=(-7, 7), 
+                y_range=(20, 39)
             )
             
             shifts_list.append((x_shift, y_shift))
-            print(f"  Shift for pair {i+1}->{i+2}: X={x_shift}, Y={y_shift}, Corr={correlation:.4f}")
+            correlations_list.append(correlation)
+            rmse_list.append(rmse)
+            combined_scores_list.append(combined_score)
+            
+            print(f"  Shift for pair {i+1}->{i+2}: X={x_shift}, Y={y_shift}")
+            print(f"  Metrics: Corr={correlation:.4f}, RMSE={rmse:.2f}, Combined={combined_score:.4f}")
     
     print(f"\nCalculated {len(shifts_list)} shift pairs for {num_images} images")
+    
+    # Create visualization of shift parameters and metrics
+    if len(shifts_list) > 0:
+        create_shift_metrics_plot(shifts_list, correlations_list, rmse_list, combined_scores_list, num_images)
     
     # Create aligned pushbroom images for each band
     print(f"\nCreating aligned pushbroom images...")
