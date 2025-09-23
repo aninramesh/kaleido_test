@@ -70,7 +70,7 @@ def extract_bands(image_data):
     return bands
 
 
-def calculate_autocorrelation_with_rmse(img1, img2, x_range=(-6, 6), y_range=(26, 39)):
+def calculate_autocorrelation_with_rmse(img1, img2, x_range=(-6, 6), y_range=(26, 39), exclude_edge_x=True, edge_x_width=32):
     """
     Calculate combined metric using both autocorrelation and RMSE for finding best shift.
     Positive y_shift means img2 is shifted UP relative to img1.
@@ -81,6 +81,8 @@ def calculate_autocorrelation_with_rmse(img1, img2, x_range=(-6, 6), y_range=(26
         img2 (numpy.ndarray): Second image to correlate (will be shifted)
         x_range (tuple): Range of x-axis shifts to test (min, max) - can be negative
         y_range (tuple): Range of y-axis shifts to test (min, max) - positive values
+        exclude_edge_x (bool): Whether to exclude problematic edge regions from analysis (default: True)
+        edge_x_width (int): Width of edge region to exclude from left side (default: 32)
         
     Returns:
         tuple: (best_x_shift, best_y_shift, max_correlation, min_rmse, best_combined_score)
@@ -88,10 +90,18 @@ def calculate_autocorrelation_with_rmse(img1, img2, x_range=(-6, 6), y_range=(26
     print(f"    Calculating autocorrelation + RMSE...")
     print(f"    X shift range: {x_range[0]} to {x_range[1]} pixels")
     print(f"    Y shift range: {y_range[0]} to {y_range[1]} pixels")
+    if exclude_edge_x:
+        print(f"    Excluding edge region: x[0:{edge_x_width}] from analysis")
     
     # Convert to float for calculations
     img1_float = img1.astype(np.float32)
     img2_float = img2.astype(np.float32)
+    
+    # Optionally exclude problematic edge region from analysis
+    if exclude_edge_x:
+        img1_float = img1_float[:, edge_x_width:]
+        img2_float = img2_float[:, edge_x_width:]
+        print(f"    Analysis region shape after edge exclusion: {img1_float.shape}")
     
     # Normalize images to have zero mean and unit variance for correlation
     img1_norm = (img1_float - np.mean(img1_float)) / np.std(img1_float)
@@ -428,7 +438,7 @@ def create_shift_metrics_plot(shifts_list, correlations_list, rmse_list, combine
     ax2.set_title('Cross-Correlation Between Consecutive Images')
     ax2.grid(True, alpha=0.3)
     ax2.set_xticks(pair_indices)
-    ax2.set_ylim([0, 1])
+    ax2.set_ylim([0.9, 1])
     
     # Add correlation values as text annotations
     for i, corr in enumerate(correlations):
@@ -456,7 +466,7 @@ def create_shift_metrics_plot(shifts_list, correlations_list, rmse_list, combine
     ax4.set_title('Combined Metric (0.7×Correlation + 0.3×Norm_RMSE)')
     ax4.grid(True, alpha=0.3)
     ax4.set_xticks(pair_indices)
-    ax4.set_ylim([0, 1])
+    ax4.set_ylim([0.9, 1])
     
     # Add combined scores as text annotations
     for i, score in enumerate(combined_scores):
@@ -501,12 +511,20 @@ def main():
                        help='Number of pixels per second (default: 25)')
     parser.add_argument('--num-images', type=int, default=3,
                        help='Number of images to process (default: 3)')
+    parser.add_argument('--exclude-edge-x', action='store_true', default=True,
+                       help='Exclude problematic edge region from correlation analysis (default: True)')
+    parser.add_argument('--no-exclude-edge-x', dest='exclude_edge_x', action='store_false',
+                       help='Include edge region in correlation analysis')
+    parser.add_argument('--edge-x-width', type=int, default=32,
+                       help='Width of edge region to exclude from left side (default: 32)')
     
     args = parser.parse_args()
     
     # Configuration variables
     fps_pixels = args.fps_pixels
     num_images = args.num_images
+    exclude_edge_x = args.exclude_edge_x
+    edge_x_width = args.edge_x_width
     
     # Path to the dataset
     dataset_path = Path("IPS_Dataset")
@@ -574,7 +592,9 @@ def main():
             x_shift, y_shift, correlation, rmse, combined_score = calculate_autocorrelation_with_rmse(
                 green_pan_1, green_pan_2, 
                 x_range=(-7, 7), 
-                y_range=(20, 39)
+                y_range=(20, 39),
+                exclude_edge_x=exclude_edge_x,
+                edge_x_width=edge_x_width
             )
             
             shifts_list.append((x_shift, y_shift))
