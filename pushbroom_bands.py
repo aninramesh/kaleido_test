@@ -9,6 +9,7 @@ from PIL import Image
 from pathlib import Path
 import matplotlib.pyplot as plt
 import argparse
+from scipy import ndimage
 
 def read_geotiff_10bit(file_path):
     """
@@ -69,6 +70,151 @@ def extract_bands(image_data):
     return bands
 
 
+def calculate_autocorrelation(img1, img2, x_range=(-6, 6), y_range=(26, 39)):
+    """
+    Calculate autocorrelation between two images within specified shift ranges.
+    Positive y_shift means img2 is shifted UP relative to img1.
+    Positive x_shift means img2 is shifted right relative to img1.
+    
+    Args:
+        img1 (numpy.ndarray): First image (reference)
+        img2 (numpy.ndarray): Second image to correlate (will be shifted)
+        x_range (tuple): Range of x-axis shifts to test (min, max) - can be negative
+        y_range (tuple): Range of y-axis shifts to test (min, max) - positive values
+        
+    Returns:
+        tuple: (best_x_shift, best_y_shift, max_correlation)
+    """
+    print(f"    Calculating autocorrelation...")
+    print(f"    X shift range: {x_range[0]} to {x_range[1]} pixels")
+    print(f"    Y shift range: {y_range[0]} to {y_range[1]} pixels")
+    
+    # Convert to float for calculations
+    img1_float = img1.astype(np.float32)
+    img2_float = img2.astype(np.float32)
+    
+    # Normalize images to have zero mean and unit variance
+    img1_norm = (img1_float - np.mean(img1_float)) / np.std(img1_float)
+    img2_norm = (img2_float - np.mean(img2_float)) / np.std(img2_float)
+    
+    # Initialize correlation tracking
+    x_shifts = range(x_range[0], x_range[1] + 1)
+    y_shifts = range(y_range[0], y_range[1] + 1)
+    
+    best_correlation = -np.inf
+    best_x_shift = 0
+    best_y_shift = 0
+    
+    # Test each shift combination
+    for y_shift in y_shifts:
+        for x_shift in x_shifts:
+            # Calculate overlapping regions when img2 is shifted by (x_shift, y_shift)
+            y_overlap_start = max(0, -y_shift)
+            y_overlap_end = min(img1.shape[0], img2.shape[0] - y_shift)
+            x_overlap_start = max(0, x_shift)
+            x_overlap_end = min(img1.shape[1], img2.shape[1] + x_shift)
+            
+            # Extract regions from img1 (reference frame)
+            y1_start = y_overlap_start
+            y1_end = y_overlap_end
+            x1_start = x_overlap_start
+            x1_end = x_overlap_end
+            
+            # Extract regions from img2 (shifted frame, UP by y_shift)
+            y2_start = y_overlap_start + y_shift
+            y2_end = y_overlap_end + y_shift
+            x2_start = x_overlap_start - x_shift
+            x2_end = x_overlap_end - x_shift
+            
+            # Extract overlapping regions
+            if (y1_end > y1_start and x1_end > x1_start and 
+                y2_end > y2_start and x2_end > x2_start):
+                
+                region1 = img1_norm[y1_start:y1_end, x1_start:x1_end]
+                region2 = img2_norm[y2_start:y2_end, x2_start:x2_end]
+                
+                # Ensure regions have the same size
+                min_h = min(region1.shape[0], region2.shape[0])
+                min_w = min(region1.shape[1], region2.shape[1])
+                
+                region1 = region1[:min_h, :min_w]
+                region2 = region2[:min_h, :min_w]
+                
+                # Calculate normalized cross-correlation
+                if region1.size > 0 and region2.size > 0:
+                    mean1 = np.mean(region1)
+                    mean2 = np.mean(region2)
+                    std1 = np.std(region1)
+                    std2 = np.std(region2)
+                    
+                    if std1 > 0 and std2 > 0:
+                        correlation = np.mean((region1 - mean1) * (region2 - mean2)) / (std1 * std2)
+                    else:
+                        correlation = 0
+                    
+                    if correlation > best_correlation:
+                        best_correlation = correlation
+                        best_x_shift = x_shift
+                        best_y_shift = y_shift
+    
+    print(f"    Best match: X={best_x_shift}, Y={best_y_shift}, Correlation={best_correlation:.4f}")
+    
+    return best_x_shift, best_y_shift, best_correlation
+
+
+def align_and_extract_pixels(band_data, x_shift, y_shift, fps_pixels, reference_width):
+    """
+    Extract fps_pixels from a band while applying the calculated shift for alignment.
+    Ensures output width matches reference_width.
+    
+    Args:
+        band_data (numpy.ndarray): Band data to extract from
+        x_shift (int): X-axis shift in pixels (positive = shifted right)
+        y_shift (int): Y-axis shift in pixels (positive = shifted up)
+        fps_pixels (int): Number of pixels to extract
+        reference_width (int): Width of the reference image to match
+        
+    Returns:
+        numpy.ndarray: Extracted and aligned pixels with reference_width
+    """
+    # For y_shift: positive means img2 is shifted UP relative to reference
+    # So we need to start extraction from a position that accounts for this shift
+    start_y = max(0, y_shift)
+    end_y = min(band_data.shape[0], start_y + fps_pixels)
+    
+    # For x_shift: ensure we maintain the same width as reference
+    # Calculate the x-region that would align with the reference
+    if x_shift >= 0:
+        # Image shifted right, take left portion
+        start_x = 0
+        end_x = min(reference_width, band_data.shape[1])
+    else:
+        # Image shifted left, take right portion  
+        start_x = min(-x_shift, band_data.shape[1] - reference_width)
+        end_x = start_x + reference_width
+        end_x = min(end_x, band_data.shape[1])
+    
+    # Extract the aligned region
+    extracted = band_data[start_y:end_y, start_x:end_x]
+    
+    # Ensure width matches reference_width
+    if extracted.shape[1] < reference_width:
+        # Pad with zeros if needed
+        padding = reference_width - extracted.shape[1]
+        extracted = np.pad(extracted, ((0, 0), (0, padding)), mode='constant', constant_values=0)
+    elif extracted.shape[1] > reference_width:
+        # Truncate if too wide
+        extracted = extracted[:, :reference_width]
+    
+    # Ensure we have the right number of rows
+    if extracted.shape[0] < fps_pixels:
+        # If not enough pixels available, use what we have
+        return extracted
+    else:
+        # Take exactly fps_pixels
+        return extracted[:fps_pixels, :]
+
+
 def create_pushbroom_image(band_data_list, band_name, fps_pixels=25):
     """
     Create a pushbroom image by stitching band images sequentially.
@@ -109,6 +255,68 @@ def create_pushbroom_image(band_data_list, band_name, fps_pixels=25):
     print(f"  {band_name} pushbroom: shape {pushbroom.shape} (first image: all pixels, others: {fps_pixels} pixels from start)")
     
     return pushbroom
+
+
+def create_aligned_pushbroom_image(band_data_list, band_name, shifts_list, fps_pixels=25):
+    """
+    Create a pushbroom image by stitching band images with autocorrelation-based alignment.
+    - First image: use all pixels (reference)
+    - Subsequent images: use fps_pixels from aligned positions based on calculated shifts
+    
+    Args:
+        band_data_list (list): List of band data arrays
+        band_name (str): Name of the band
+        shifts_list (list): List of (x_shift, y_shift) tuples for each image pair
+        fps_pixels (int): Number of pixels to use from each subsequent image
+        
+    Returns:
+        numpy.ndarray: Stitched aligned pushbroom image
+    """
+    if not band_data_list:
+        return None
+    
+    # Start with the first image (all pixels, reference)
+    pushbroom = band_data_list[0].copy()
+    reference_width = band_data_list[0].shape[1]
+    
+    # Track cumulative shifts from the reference image
+    cumulative_x_shift = 0
+    cumulative_y_shift = 0
+    
+    # Add aligned pixels from each subsequent image
+    for i in range(1, len(band_data_list)):
+        if i-1 < len(shifts_list):  # Make sure we have shift data
+            # Get shift for this image pair
+            x_shift, y_shift = shifts_list[i-1]
+            
+            # Accumulate shifts from reference
+            cumulative_x_shift += x_shift
+            cumulative_y_shift += y_shift
+            
+            print(f"    Image {i+1}: applying cumulative shift X={cumulative_x_shift}, Y={cumulative_y_shift}")
+            
+            # Extract aligned pixels using cumulative shift
+            band_data = band_data_list[i]
+            aligned_pixels = align_and_extract_pixels(
+                band_data, cumulative_x_shift, cumulative_y_shift, fps_pixels, reference_width
+            )
+            
+            # Append to the beginning of the pushbroom (newer images at top)
+            pushbroom = np.vstack([aligned_pixels, pushbroom])
+        else:
+            print(f"    Image {i+1}: no shift data available, using original method")
+            # Fallback to original method if no shift data
+            band_data = band_data_list[i]
+            if band_data.shape[0] >= fps_pixels:
+                selected_pixels = band_data[:fps_pixels, :]
+            else:
+                selected_pixels = band_data
+            pushbroom = np.vstack([selected_pixels, pushbroom])
+    
+    print(f"  {band_name} aligned pushbroom: shape {pushbroom.shape} (with autocorrelation alignment)")
+    
+    return pushbroom
+
 
 def save_10bit_tiff(img_array, output_path):
     """
@@ -193,20 +401,49 @@ def main():
         else:
             print(f"  Failed to read {tiff_file.name}")
     
-    # Create pushbroom images for each band
-    print(f"\nCreating pushbroom images...")
+    # Calculate shifts between consecutive images using green_pan band
+    print(f"\nCalculating autocorrelation shifts between consecutive images...")
+    shifts_list = []
+    
+    if len(band_data_lists['green_pan']) >= 2:
+        for i in range(len(band_data_lists['green_pan']) - 1):
+            print(f"\nCalculating shift between image {i+1} and {i+2}:")
+            green_pan_1 = band_data_lists['green_pan'][i]
+            green_pan_2 = band_data_lists['green_pan'][i+1]
+            
+            # Calculate autocorrelation shift
+            x_shift, y_shift, correlation = calculate_autocorrelation(
+                green_pan_1, green_pan_2, 
+                x_range=(-6, 6), 
+                y_range=(26, 39)
+            )
+            
+            shifts_list.append((x_shift, y_shift))
+            print(f"  Shift for pair {i+1}->{i+2}: X={x_shift}, Y={y_shift}, Corr={correlation:.4f}")
+    
+    print(f"\nCalculated {len(shifts_list)} shift pairs for {num_images} images")
+    
+    # Create aligned pushbroom images for each band
+    print(f"\nCreating aligned pushbroom images...")
     
     for band_name, band_data_list in band_data_lists.items():
         if band_data_list:
-            print(f"\nCreating {band_name} pushbroom...")
+            print(f"\nCreating {band_name} aligned pushbroom...")
             
-            # Create pushbroom image with fps_pixels parameter
-            pushbroom = create_pushbroom_image(band_data_list, band_name, fps_pixels)
+            # Create aligned pushbroom image using calculated shifts
+            pushbroom = create_aligned_pushbroom_image(band_data_list, band_name, shifts_list, fps_pixels)
             
             if pushbroom is not None:
-                # Save pushbroom image
-                output_path = f"pushbroom_{band_name}_{num_images}images_{fps_pixels}pxsec.tiff"
+                # Save aligned pushbroom image
+                output_path = f"pushbroom_aligned_{band_name}_{num_images}images_{fps_pixels}pxsec.tiff"
                 save_10bit_tiff(pushbroom, output_path)
+                
+                # Also create non-aligned version for comparison
+                print(f"  Creating comparison (non-aligned) {band_name} pushbroom...")
+                pushbroom_original = create_pushbroom_image(band_data_list, band_name, fps_pixels)
+                if pushbroom_original is not None:
+                    output_path_orig = f"pushbroom_original_{band_name}_{num_images}images_{fps_pixels}pxsec.tiff"
+                    save_10bit_tiff(pushbroom_original, output_path_orig)
                 
                 # Also save individual band from first image for reference
                 if band_data_list:
