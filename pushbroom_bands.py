@@ -162,57 +162,72 @@ def calculate_autocorrelation(img1, img2, x_range=(-6, 6), y_range=(26, 39)):
     return best_x_shift, best_y_shift, best_correlation
 
 
-def align_and_extract_pixels(band_data, x_shift, y_shift, fps_pixels, reference_width):
+def extract_new_pushbroom_data(band_data, x_shift, y_shift, reference_width):
     """
-    Extract fps_pixels from a band while applying the calculated shift for alignment.
-    Ensures output width matches reference_width.
+    Extract new pushbroom data using Y-shift to determine the new content region:
+    1. Use y[0:y_shift] from the image (this is the new content not overlapping with previous image)
+    2. Apply X-shift for horizontal alignment
     
     Args:
         band_data (numpy.ndarray): Band data to extract from
-        x_shift (int): X-axis shift in pixels (positive = shifted right)
-        y_shift (int): Y-axis shift in pixels (positive = shifted up)
-        fps_pixels (int): Number of pixels to extract
+        x_shift (int): X-axis shift for alignment (positive = shifted right)
+        y_shift (int): Y-axis shift that defines how much new content is available
         reference_width (int): Width of the reference image to match
         
     Returns:
-        numpy.ndarray: Extracted and aligned pixels with reference_width
+        numpy.ndarray: Extracted new data with reference_width
     """
-    # For y_shift: positive means img2 is shifted UP relative to reference
-    # So we need to start extraction from a position that accounts for this shift
-    start_y = max(0, y_shift)
-    end_y = min(band_data.shape[0], start_y + fps_pixels)
+    print(f"      Extracting new data y[0:{y_shift}] with X-shift={x_shift}")
     
-    # For x_shift: ensure we maintain the same width as reference
-    # Calculate the x-region that would align with the reference
+    # Extract y[0:y_shift] - this is the new content region
+    start_y = 0
+    end_y = min(y_shift, band_data.shape[0])
+    
+    # If y_shift is larger than image height, use all available rows
+    if y_shift > band_data.shape[0]:
+        print(f"      Warning: y_shift={y_shift} > image height={band_data.shape[0]}, using all available rows")
+        end_y = band_data.shape[0]
+    
+    # Apply X-shift for horizontal alignment
     if x_shift >= 0:
-        # Image shifted right, take left portion
+        # Image shifted right relative to reference
+        # To align, extract from the right side of the image
         start_x = 0
-        end_x = min(reference_width, band_data.shape[1])
+        end_x = min(reference_width, band_data.shape[1] - x_shift)
     else:
-        # Image shifted left, take right portion  
-        start_x = min(-x_shift, band_data.shape[1] - reference_width)
-        end_x = start_x + reference_width
-        end_x = min(end_x, band_data.shape[1])
+        # Image shifted left relative to reference  
+        # To align, extract from the left side, offset by the shift amount
+        start_x = -x_shift
+        end_x = min(start_x + reference_width, band_data.shape[1])
     
-    # Extract the aligned region
+    # Ensure valid extraction bounds
+    start_x = max(0, start_x)
+    end_x = max(start_x, min(end_x, band_data.shape[1]))
+    
+    print(f"      Extraction bounds: y[{start_y}:{end_y}], x[{start_x}:{end_x}]")
+    
+    # Extract the new data region
     extracted = band_data[start_y:end_y, start_x:end_x]
     
-    # Ensure width matches reference_width
-    if extracted.shape[1] < reference_width:
-        # Pad with zeros if needed
-        padding = reference_width - extracted.shape[1]
-        extracted = np.pad(extracted, ((0, 0), (0, padding)), mode='constant', constant_values=0)
-    elif extracted.shape[1] > reference_width:
+    print(f"      Extracted shape before padding: {extracted.shape}")
+    
+    # Ensure width matches reference_width by padding if needed
+    current_width = extracted.shape[1]
+    if current_width < reference_width:
+        padding_needed = reference_width - current_width
+        if x_shift >= 0:
+            # Pad on the right (image shifted right, so pad right side)
+            extracted = np.pad(extracted, ((0, 0), (0, padding_needed)), mode='constant', constant_values=0)
+        else:
+            # Pad on the left (image shifted left, so pad left side)
+            extracted = np.pad(extracted, ((0, 0), (padding_needed, 0)), mode='constant', constant_values=0)
+    elif current_width > reference_width:
         # Truncate if too wide
         extracted = extracted[:, :reference_width]
     
-    # Ensure we have the right number of rows
-    if extracted.shape[0] < fps_pixels:
-        # If not enough pixels available, use what we have
-        return extracted
-    else:
-        # Take exactly fps_pixels
-        return extracted[:fps_pixels, :]
+    print(f"      Final extracted shape: {extracted.shape}")
+    
+    return extracted
 
 
 def create_pushbroom_image(band_data_list, band_name, fps_pixels=25):
@@ -295,14 +310,14 @@ def create_aligned_pushbroom_image(band_data_list, band_name, shifts_list, fps_p
             
             print(f"    Image {i+1}: applying cumulative shift X={cumulative_x_shift}, Y={cumulative_y_shift}")
             
-            # Extract aligned pixels using cumulative shift
+            # Extract new pushbroom data using Y-shift to define new content region
             band_data = band_data_list[i]
-            aligned_pixels = align_and_extract_pixels(
-                band_data, cumulative_x_shift, cumulative_y_shift, fps_pixels, reference_width
+            new_data = extract_new_pushbroom_data(
+                band_data, x_shift, y_shift, reference_width
             )
             
             # Append to the beginning of the pushbroom (newer images at top)
-            pushbroom = np.vstack([aligned_pixels, pushbroom])
+            pushbroom = np.vstack([new_data, pushbroom])
         else:
             print(f"    Image {i+1}: no shift data available, using original method")
             # Fallback to original method if no shift data
@@ -343,8 +358,8 @@ def main():
     parser = argparse.ArgumentParser(description='Create pushbroom images from 10-bit GeoTIFF files')
     parser.add_argument('--fps-pixels', type=int, default=25, 
                        help='Number of pixels per second (default: 25)')
-    parser.add_argument('--num-images', type=int, default=10,
-                       help='Number of images to process (default: 10)')
+    parser.add_argument('--num-images', type=int, default=3,
+                       help='Number of images to process (default: 3)')
     
     args = parser.parse_args()
     

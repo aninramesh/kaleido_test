@@ -251,8 +251,8 @@ def save_as_10bit_tiff(img_array, output_path="converted_10bit.tiff"):
 # Example usage
 if __name__ == "__main__":
     # Read the specific GeoTIFF file you have open
-    file_path = "IPS_Dataset/image_003721.tiff"
-    file_path2 = "IPS_Dataset/image_003722.tiff"  # Alternative extension
+    file_path = "IPS_Dataset/image_003808.tiff"
+    file_path2 = "IPS_Dataset/image_003809.tiff"  # Alternative extension
     
     try:
         # Read the 10-bit GeoTIFF
