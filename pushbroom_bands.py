@@ -10,6 +10,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import argparse
 from scipy import ndimage
+from multiprocessing import Pool, cpu_count
 
 def read_geotiff_10bit(file_path):
     """
@@ -211,6 +212,31 @@ def calculate_autocorrelation_with_rmse(img1, img2, x_range=(-6, 6), y_range=(26
     else:
         print(f"    No valid overlapping regions found!")
         return 0, 0, 0, float('inf'), 0
+
+
+def calculate_shift_for_pair(args):
+    """
+    Calculate shift between a pair of images. Designed for parallel processing.
+
+    Args:
+        args: Tuple containing (green_pan_1, green_pan_2, i, x_range, y_range, exclude_edge_x, edge_x_width)
+
+    Returns:
+        tuple: (i, x_shift, y_shift, correlation, rmse, combined_score)
+    """
+    green_pan_1, green_pan_2, i, x_range, y_range, exclude_edge_x, edge_x_width = args
+
+    print(f"  Calculating shift between image {i+1} and {i+2} (parallel worker)")
+
+    x_shift, y_shift, correlation, rmse, combined_score = calculate_autocorrelation_with_rmse(
+        green_pan_1, green_pan_2,
+        x_range=x_range,
+        y_range=y_range,
+        exclude_edge_x=exclude_edge_x,
+        edge_x_width=edge_x_width
+    )
+
+    return (i, x_shift, y_shift, correlation, rmse, combined_score)
 
 
 def extract_new_pushbroom_data(band_data, x_shift, y_shift, reference_width):
@@ -594,35 +620,41 @@ def main():
             print(f"  Failed to read {tiff_file.name}")
     
     # Calculate shifts between consecutive images using green_pan band
-    print(f"\nCalculating autocorrelation shifts between consecutive images...")
+    print(f"\nCalculating autocorrelation shifts between consecutive images (parallel processing)...")
     shifts_list = []
     correlations_list = []
     rmse_list = []
     combined_scores_list = []
-    
+
     if len(band_data_lists['green_pan']) >= 2:
+        # Prepare arguments for parallel processing
+        shift_args = []
         for i in range(len(band_data_lists['green_pan']) - 1):
-            print(f"\nCalculating shift between image {i+1} and {i+2}:")
             green_pan_1 = band_data_lists['green_pan'][i]
             green_pan_2 = band_data_lists['green_pan'][i+1]
-            
-            # Calculate autocorrelation + RMSE combined shift
-            x_shift, y_shift, correlation, rmse, combined_score = calculate_autocorrelation_with_rmse(
-                green_pan_1, green_pan_2, 
-                x_range=(-7, 7), 
-                y_range=(20, 39),
-                exclude_edge_x=exclude_edge_x,
-                edge_x_width=edge_x_width
-            )
-            
+            args = (green_pan_1, green_pan_2, i, (-7, 7), (20, 39), exclude_edge_x, edge_x_width)
+            shift_args.append(args)
+
+        # Determine number of processes to use (don't exceed number of CPU cores)
+        num_processes = min(len(shift_args), cpu_count())
+        print(f"  Using {num_processes} parallel processes for {len(shift_args)} shift calculations")
+
+        # Calculate shifts in parallel
+        with Pool(processes=num_processes) as pool:
+            results = pool.map(calculate_shift_for_pair, shift_args)
+
+        # Sort results by image pair index and extract data
+        results.sort(key=lambda x: x[0])  # Sort by image pair index (i)
+
+        for i, x_shift, y_shift, correlation, rmse, combined_score in results:
             shifts_list.append((x_shift, y_shift))
             correlations_list.append(correlation)
             rmse_list.append(rmse)
             combined_scores_list.append(combined_score)
-            
+
             print(f"  Shift for pair {i+1}->{i+2}: X={x_shift}, Y={y_shift}")
             print(f"  Metrics: Corr={correlation:.4f}, RMSE={rmse:.2f}, Combined={combined_score:.4f}")
-    
+
     print(f"\nCalculated {len(shifts_list)} shift pairs for {actual_num_images} images")
     
     # Create visualization of shift parameters and metrics
@@ -643,18 +675,6 @@ def main():
                 # Save aligned pushbroom image
                 output_path = f"pushbroom_aligned_{band_name}_{actual_num_images}images_start{start_image}_{fps_pixels}pxsec.tiff"
                 save_10bit_tiff(pushbroom, output_path)
-
-                # Also create non-aligned version for comparison
-                print(f"  Creating comparison (non-aligned) {band_name} pushbroom...")
-                pushbroom_original = create_pushbroom_image(band_data_list, band_name, fps_pixels)
-                if pushbroom_original is not None:
-                    output_path_orig = f"pushbroom_original_{band_name}_{actual_num_images}images_start{start_image}_{fps_pixels}pxsec.tiff"
-                    save_10bit_tiff(pushbroom_original, output_path_orig)
-                
-                # Also save individual band from first image for reference
-                if band_data_list:
-                    single_band_path = f"single_{band_name}_band.tiff"
-                    save_10bit_tiff(band_data_list[0], single_band_path)
         else:
             print(f"No data available for {band_name} band")
     
