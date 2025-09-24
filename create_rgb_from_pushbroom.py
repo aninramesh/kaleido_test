@@ -62,7 +62,7 @@ def extract_rgb_bands(pushbroom_data, band_ranges):
 
     return red_band, green_band, blue_band
 
-def normalize_band_for_display(band_data, percentile_clip=(2, 98), bits=8):
+def normalize_band_for_display(band_data, percentile_clip=(2, 98)):
     """
     Normalize band data for display using percentile clipping.
 
@@ -82,12 +82,7 @@ def normalize_band_for_display(band_data, percentile_clip=(2, 98), bits=8):
     normalized = (clipped - low_val) / (high_val - low_val)
 
     # Convert to 0-255 uint8
-    if bits == 8:
-        normalized_uint8 = (normalized * 255).astype(np.uint8)
-    elif bits == 10:
-        normalized_uint8 = (normalized * 1023).astype(np.uint16)
-    else:
-        raise ValueError("Unsupported bit depth. Use 8 or 10.")
+    normalized_uint8 = (normalized * 255).astype(np.uint8)
 
     return normalized_uint8
 
@@ -351,8 +346,23 @@ def save_rgb_geotiff(rgb_image, output_path, transform=None, crs='EPSG:4326'):
     """
     height, width, bands = rgb_image.shape
 
-    # Convert to 10-bit (0-1023 range)
-    rgb_10bit = (rgb_image.astype(np.float32) / 255.0 * 1023.0).astype(np.uint16)
+    # Scale to full 10-bit range (0-1023) by stretching the data
+    rgb_10bit = np.zeros((height, width, bands), dtype=np.uint16)
+
+    for band_idx in range(bands):
+        band_data = rgb_image[:, :, band_idx].astype(np.float32)
+
+        # Stretch to full 10-bit range
+        min_val = band_data.min()
+        max_val = band_data.max()
+
+        if max_val > min_val:
+            # Stretch from current range to 0-1023
+            stretched = ((band_data - min_val) / (max_val - min_val)) * 1023.0
+        else:
+            stretched = band_data
+
+        rgb_10bit[:, :, band_idx] = stretched.astype(np.uint16)
 
     # Create default transform if none provided (basic pixel coordinates)
     if transform is None:
