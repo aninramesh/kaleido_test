@@ -9,6 +9,7 @@ from PIL import Image
 from pathlib import Path
 import argparse
 import matplotlib.pyplot as plt
+from scipy import ndimage
 
 def read_pushbroom_tiff(file_path):
     """
@@ -82,6 +83,114 @@ def normalize_band_for_display(band_data, percentile_clip=(2, 98)):
     normalized_uint8 = (normalized * 255).astype(np.uint8)
 
     return normalized_uint8
+
+def calculate_rgb_alignment(red_band, green_band, blue_band, x_range=(-4, 4), y_range=(-4, 4)):
+    """
+    Calculate optimal X and Y shifts for red and green bands to align with blue band using autocorrelation.
+    Blue band is used as reference.
+
+    Args:
+        red_band (numpy.ndarray): Red channel data
+        green_band (numpy.ndarray): Green channel data
+        blue_band (numpy.ndarray): Blue channel data (reference)
+        x_range (tuple): Range of x-axis shifts to test (min, max)
+        y_range (tuple): Range of y-axis shifts to test (min, max)
+
+    Returns:
+        tuple: (red_x_shift, red_y_shift, green_x_shift, green_y_shift, red_correlation, green_correlation)
+    """
+    print(f"  Calculating RGB channel alignment using blue as reference...")
+    print(f"  Search range: X={x_range[0]} to {x_range[1]}, Y={y_range[0]} to {y_range[1]} pixels")
+
+    # Convert to float for calculations
+    red_float = red_band.astype(np.float32)
+    green_float = green_band.astype(np.float32)
+    blue_float = blue_band.astype(np.float32)
+
+    # Normalize all bands to 0-1023 range before autocorrelation
+    def normalize_to_10bit(band_data, band_name):
+        """Normalize band data to 0-1023 range"""
+        min_val = band_data.min()
+        max_val = band_data.max()
+        if max_val > min_val:
+            normalized = ((band_data - min_val) / (max_val - min_val)) * 1023.0
+        else:
+            normalized = np.zeros_like(band_data)
+        print(f"    {band_name}: normalized from [{min_val:.1f}, {max_val:.1f}] to [0, 1023]")
+        return normalized
+
+    red_10bit = normalize_to_10bit(red_float, "Red")
+    green_10bit = normalize_to_10bit(green_float, "Green")
+    blue_10bit = normalize_to_10bit(blue_float, "Blue")
+
+    # Normalize bands for correlation calculation (zero mean, unit variance)
+    red_norm = (red_10bit - np.mean(red_10bit)) / np.std(red_10bit)
+    green_norm = (green_10bit - np.mean(green_10bit)) / np.std(green_10bit)
+    blue_norm = (blue_10bit - np.mean(blue_10bit)) / np.std(blue_10bit)
+
+    def find_best_alignment(band_norm, band_name):
+        """Find best alignment for a band against blue reference"""
+        print(f"    Finding alignment for {band_name} band...")
+
+        best_correlation = -1
+        best_x_shift = 0
+        best_y_shift = 0
+
+        x_shifts = range(x_range[0], x_range[1] + 1)
+        y_shifts = range(y_range[0], y_range[1] + 1)
+
+        for y_shift in y_shifts:
+            for x_shift in x_shifts:
+                # Calculate overlapping region when band is shifted by (x_shift, y_shift)
+                y_start = max(0, y_shift)
+                y_end = min(blue_norm.shape[0], band_norm.shape[0] + y_shift)
+                x_start = max(0, x_shift)
+                x_end = min(blue_norm.shape[1], band_norm.shape[1] + x_shift)
+
+                # Extract regions from blue (reference)
+                blue_region = blue_norm[y_start:y_end, x_start:x_end]
+
+                # Extract regions from shifted band
+                band_y_start = y_start - y_shift
+                band_y_end = y_end - y_shift
+                band_x_start = x_start - x_shift
+                band_x_end = x_end - x_shift
+
+                if (band_y_end > band_y_start and band_x_end > band_x_start and
+                    blue_region.size > 0):
+
+                    band_region = band_norm[band_y_start:band_y_end, band_x_start:band_x_end]
+
+                    # Ensure regions have same size
+                    min_h = min(blue_region.shape[0], band_region.shape[0])
+                    min_w = min(blue_region.shape[1], band_region.shape[1])
+
+                    blue_region = blue_region[:min_h, :min_w]
+                    band_region = band_region[:min_h, :min_w]
+
+                    if blue_region.size > 0 and band_region.size > 0:
+                        # Calculate normalized cross-correlation
+                        blue_mean = np.mean(blue_region)
+                        band_mean = np.mean(band_region)
+                        blue_std = np.std(blue_region)
+                        band_std = np.std(band_region)
+
+                        if blue_std > 0 and band_std > 0:
+                            correlation = np.mean((blue_region - blue_mean) * (band_region - band_mean)) / (blue_std * band_std)
+
+                            if correlation > best_correlation:
+                                best_correlation = correlation
+                                best_x_shift = x_shift
+                                best_y_shift = y_shift
+
+        print(f"      Best {band_name} alignment: X={best_x_shift}, Y={best_y_shift}, Correlation={best_correlation:.4f}")
+        return best_x_shift, best_y_shift, best_correlation
+
+    # Find best alignment for red and green bands
+    red_x_shift, red_y_shift, red_correlation = find_best_alignment(red_norm, "red")
+    green_x_shift, green_y_shift, green_correlation = find_best_alignment(green_norm, "green")
+
+    return red_x_shift, red_y_shift, green_x_shift, green_y_shift, red_correlation, green_correlation
 
 def create_rgb_image(red_band, green_band, blue_band, enhance_contrast=True, red_shift_param=396, green_shift_param=612, red_x_shift=0, green_x_shift=0, blue_x_shift=0):
     """
@@ -244,6 +353,12 @@ def main():
                        help='Pixels to shift green band horizontally (positive=right, negative=left, default: 0)')
     parser.add_argument('--blue-x-shift', type=int, default=0,
                        help='Pixels to shift blue band horizontally (positive=right, negative=left, default: 0)')
+    parser.add_argument('--rgb-align-x-range', type=int, nargs=2, default=[-4, 4],
+                       help='X-axis range for RGB autocorrelation alignment (default: -4 4)')
+    parser.add_argument('--rgb-align-y-range', type=int, nargs=2, default=[-4, 4],
+                       help='Y-axis range for RGB autocorrelation alignment (default: -4 4)')
+    parser.add_argument('--disable-rgb-align', action='store_true', default=False,
+                       help='Disable automatic RGB channel alignment using autocorrelation (default: False)')
 
     args = parser.parse_args()
 
@@ -309,9 +424,148 @@ def main():
     print(f"\nExtracting RGB bands...")
     red_band, green_band, blue_band = extract_rgb_bands(pushbroom_data, band_ranges)
 
-    # Create RGB image
-    print(f"\nCreating RGB image...")
-    rgb_image = create_rgb_image(red_band, green_band, blue_band, args.enhance_contrast, args.red_shift, args.green_shift, args.red_x_shift, args.green_x_shift, args.blue_x_shift)
+    # Stage 1: Apply manual shifts first (coarse positioning)
+    print(f"\nStage 1: Applying manual shifts for coarse band positioning...")
+    print(f"  Manual shifts: Red Y={args.red_shift}, Green Y={args.green_shift}")
+
+    # Apply manual shifts using existing create_rgb_image logic but extract intermediate results
+    def apply_manual_shifts_to_bands(red_band, green_band, blue_band):
+        """Apply manual Y and X shifts to get roughly aligned bands"""
+        print(f"  Applying manual Y-shifts...")
+
+        # Apply Y-shifts (vertical) - same logic as in create_rgb_image
+        red_y_shifted = np.pad(red_band, ((args.red_shift, 0), (0, 0)), mode='constant', constant_values=0)
+        green_y_shifted = np.pad(green_band, ((args.green_shift, 0), (0, 0)), mode='constant', constant_values=0)
+        blue_y_shifted = blue_band  # Blue is reference for Y
+
+        # Apply manual X-shifts if any
+        def apply_manual_x_shift(band_data, x_shift):
+            if x_shift == 0:
+                return band_data
+            elif x_shift > 0:
+                return np.pad(band_data, ((0, 0), (x_shift, 0)), mode='constant', constant_values=0)
+            else:
+                abs_shift = -x_shift
+                if abs_shift >= band_data.shape[1]:
+                    return np.zeros_like(band_data)
+                else:
+                    cropped = band_data[:, abs_shift:]
+                    return np.pad(cropped, ((0, 0), (0, abs_shift)), mode='constant', constant_values=0)
+
+        red_shifted = apply_manual_x_shift(red_y_shifted, args.red_x_shift)
+        green_shifted = apply_manual_x_shift(green_y_shifted, args.green_x_shift)
+        blue_shifted = apply_manual_x_shift(blue_y_shifted, args.blue_x_shift)
+
+        # Crop to same size
+        min_height = min(red_shifted.shape[0], green_shifted.shape[0], blue_shifted.shape[0])
+        min_width = min(red_shifted.shape[1], green_shifted.shape[1], blue_shifted.shape[1])
+
+        red_cropped = red_shifted[:min_height, :min_width]
+        green_cropped = green_shifted[:min_height, :min_width]
+        blue_cropped = blue_shifted[:min_height, :min_width]
+
+        print(f"    Manual alignment result: {min_height}x{min_width}")
+        return red_cropped, green_cropped, blue_cropped
+
+    # Apply manual shifts first
+    manually_shifted_red, manually_shifted_green, manually_shifted_blue = apply_manual_shifts_to_bands(red_band, green_band, blue_band)
+
+    # Stage 2: Apply RGB autocorrelation alignment (fine-tuning)
+    if not args.disable_rgb_align:
+        print(f"\nStage 2: Fine-tuning RGB channel alignment using autocorrelation...")
+        print(f"  Search ranges: X={args.rgb_align_x_range}, Y={args.rgb_align_y_range}")
+
+        rgb_red_x_shift, rgb_red_y_shift, rgb_green_x_shift, rgb_green_y_shift, red_correlation, green_correlation = calculate_rgb_alignment(
+            manually_shifted_red, manually_shifted_green, manually_shifted_blue,
+            x_range=tuple(args.rgb_align_x_range),
+            y_range=tuple(args.rgb_align_y_range)
+        )
+
+        print(f"  Fine alignment results:")
+        print(f"    Red band: X={rgb_red_x_shift}, Y={rgb_red_y_shift}, Correlation={red_correlation:.4f}")
+        print(f"    Green band: X={rgb_green_x_shift}, Y={rgb_green_y_shift}, Correlation={green_correlation:.4f}")
+        print(f"    Blue band: reference (no fine adjustment)")
+
+        # Apply fine alignment shifts
+        def apply_fine_shift(band_data, x_shift, y_shift, band_name):
+            """Apply fine X and Y shifts for autocorrelation alignment"""
+            print(f"    Applying {band_name} fine shift: X={x_shift}, Y={y_shift}")
+
+            if x_shift == 0 and y_shift == 0:
+                return band_data
+
+            shifted_band = np.zeros_like(band_data)
+
+            # Calculate regions with proper boundary handling
+            src_y_start = max(0, -y_shift)
+            src_y_end = min(band_data.shape[0], band_data.shape[0] - y_shift)
+            src_x_start = max(0, -x_shift)
+            src_x_end = min(band_data.shape[1], band_data.shape[1] - x_shift)
+
+            dst_y_start = max(0, y_shift)
+            dst_y_end = dst_y_start + (src_y_end - src_y_start)
+            dst_x_start = max(0, x_shift)
+            dst_x_end = dst_x_start + (src_x_end - src_x_start)
+
+            if (src_y_end > src_y_start and src_x_end > src_x_start and
+                dst_y_end <= shifted_band.shape[0] and dst_x_end <= shifted_band.shape[1]):
+                shifted_band[dst_y_start:dst_y_end, dst_x_start:dst_x_end] = \
+                    band_data[src_y_start:src_y_end, src_x_start:src_x_end]
+
+            return shifted_band
+
+        # Apply fine alignment to manually shifted bands
+        final_red_band = apply_fine_shift(manually_shifted_red, rgb_red_x_shift, rgb_red_y_shift, "Red")
+        final_green_band = apply_fine_shift(manually_shifted_green, rgb_green_x_shift, rgb_green_y_shift, "Green")
+        final_blue_band = manually_shifted_blue  # Blue is reference
+
+        print(f"  RGB bands are now optimally aligned (manual + autocorrelation)")
+    else:
+        print(f"\nStage 2: Autocorrelation alignment disabled, using manual alignment only...")
+        final_red_band = manually_shifted_red
+        final_green_band = manually_shifted_green
+        final_blue_band = manually_shifted_blue
+
+    # Create RGB image from aligned bands (no additional shifts needed)
+    print(f"\nCreating RGB image from aligned bands...")
+
+    # Find valid data region
+    valid_mask = (final_red_band > 0) & (final_green_band > 0) & (final_blue_band > 0)
+    valid_rows = np.any(valid_mask, axis=1)
+    valid_cols = np.any(valid_mask, axis=0)
+
+    if not np.any(valid_rows) or not np.any(valid_cols):
+        print(f"  Warning: No overlapping valid data found in all three channels!")
+        rgb_image = np.stack([
+            normalize_band_for_display(final_red_band),
+            normalize_band_for_display(final_green_band),
+            normalize_band_for_display(final_blue_band)
+        ], axis=2)
+    else:
+        row_start = np.where(valid_rows)[0][0]
+        row_end = np.where(valid_rows)[0][-1] + 1
+        col_start = np.where(valid_cols)[0][0]
+        col_end = np.where(valid_cols)[0][-1] + 1
+
+        print(f"  Valid RGB region: rows {row_start}:{row_end}, cols {col_start}:{col_end}")
+
+        red_valid = final_red_band[row_start:row_end, col_start:col_end]
+        green_valid = final_green_band[row_start:row_end, col_start:col_end]
+        blue_valid = final_blue_band[row_start:row_end, col_start:col_end]
+
+        # Apply contrast enhancement
+        if args.enhance_contrast:
+            red_norm = normalize_band_for_display(red_valid)
+            green_norm = normalize_band_for_display(green_valid)
+            blue_norm = normalize_band_for_display(blue_valid)
+        else:
+            red_norm = ((red_valid / red_valid.max()) * 255).astype(np.uint8)
+            green_norm = ((green_valid / green_valid.max()) * 255).astype(np.uint8)
+            blue_norm = ((blue_valid / blue_valid.max()) * 255).astype(np.uint8)
+
+        rgb_image = np.stack([red_norm, green_norm, blue_norm], axis=2)
+
+    print(f"  Final RGB image: {rgb_image.shape}")
 
     # Save RGB image
     contrast_suffix = "_enhanced" if args.enhance_contrast else "_simple"
