@@ -38,7 +38,8 @@ def read_geotiff_10bit(file_path):
             return img_array
         else:
             print(f"Warning: Data doesn't appear to be 10-bit format")
-            return img_array
+            true_10bit = img_array / 16.0
+            return true_10bit.astype(np.uint16)
 
 def extract_bands(image_data):
     """
