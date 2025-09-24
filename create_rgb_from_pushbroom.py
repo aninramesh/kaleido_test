@@ -83,14 +83,14 @@ def normalize_band_for_display(band_data, percentile_clip=(2, 98)):
 
     return normalized_uint8
 
-def create_rgb_image(red_band, green_band, blue_band, enhance_contrast=True, red_shift_param=396, green_shift_param=612):
+def create_rgb_image(red_band, green_band, blue_band, enhance_contrast=True, red_shift_param=396, green_shift_param=612, red_x_shift=0, green_x_shift=0, blue_x_shift=0):
     """
     Create RGB image from individual band data with proper spatial alignment.
 
     Applies shifts to align bands spatially:
-    - Blue band: reference (no shift)
-    - Red band: shift down by 396 pixels to align with blue
-    - Green band: shift down by 612 pixels to align with blue
+    - Blue band: reference (customizable x_shift)
+    - Red band: shift down by 396 pixels and horizontally by red_x_shift to align with blue
+    - Green band: shift down by 612 pixels and horizontally by green_x_shift to align with blue
 
     Args:
         red_band (numpy.ndarray): Red channel data
@@ -99,6 +99,9 @@ def create_rgb_image(red_band, green_band, blue_band, enhance_contrast=True, red
         enhance_contrast (bool): Whether to apply contrast enhancement
         red_shift_param (int): Pixels to shift red band down (default: 396)
         green_shift_param (int): Pixels to shift green band down (default: 612)
+        red_x_shift (int): Pixels to shift red band horizontally (positive=right, negative=left, default: 0)
+        green_x_shift (int): Pixels to shift green band horizontally (positive=right, negative=left, default: 0)
+        blue_x_shift (int): Pixels to shift blue band horizontally (positive=right, negative=left, default: 0)
 
     Returns:
         numpy.ndarray: RGB image (height, width, 3)
@@ -113,19 +116,42 @@ def create_rgb_image(red_band, green_band, blue_band, enhance_contrast=True, red
     green_shift = green_shift_param  # Green shifts down
 
     print(f"  Applying spatial shifts for band alignment:")
-    print(f"    Red: shifting down by {red_shift} pixels")
-    print(f"    Green: shifting down by {green_shift} pixels")
-    print(f"    Blue: reference (no shift)")
+    print(f"    Red: shifting down by {red_shift} pixels, horizontally by {red_x_shift} pixels")
+    print(f"    Green: shifting down by {green_shift} pixels, horizontally by {green_x_shift} pixels")
+    print(f"    Blue: horizontally by {blue_x_shift} pixels")
 
-    # Apply shifts by padding and cropping
+    # Apply Y-shifts (vertical) by padding and cropping
     # Red band: add padding at top, crop from bottom
-    red_shifted = np.pad(red_band, ((red_shift, 0), (0, 0)), mode='constant', constant_values=0)
+    red_y_shifted = np.pad(red_band, ((red_shift, 0), (0, 0)), mode='constant', constant_values=0)
 
     # Green band: add padding at top, crop from bottom
-    green_shifted = np.pad(green_band, ((green_shift, 0), (0, 0)), mode='constant', constant_values=0)
+    green_y_shifted = np.pad(green_band, ((green_shift, 0), (0, 0)), mode='constant', constant_values=0)
 
-    # Blue band: no shift needed (reference)
-    blue_shifted = blue_band
+    # Blue band: no Y-shift needed
+    blue_y_shifted = blue_band
+
+    # Apply X-shifts (horizontal) by padding and cropping
+    def apply_x_shift(band_data, x_shift):
+        if x_shift == 0:
+            return band_data
+        elif x_shift > 0:
+            # Shift right: add padding on left
+            return np.pad(band_data, ((0, 0), (x_shift, 0)), mode='constant', constant_values=0)
+        else:
+            # Shift left: crop from left and add padding on right
+            abs_shift = -x_shift
+            if abs_shift >= band_data.shape[1]:
+                # Shift is larger than width, return all zeros
+                return np.zeros_like(band_data)
+            else:
+                # Crop from left and add padding on right
+                cropped = band_data[:, abs_shift:]
+                return np.pad(cropped, ((0, 0), (0, abs_shift)), mode='constant', constant_values=0)
+
+    # Apply X-shifts to all bands
+    red_shifted = apply_x_shift(red_y_shifted, red_x_shift)
+    green_shifted = apply_x_shift(green_y_shifted, green_x_shift)
+    blue_shifted = apply_x_shift(blue_y_shifted, blue_x_shift)
 
     print(f"  Shifted band shapes:")
     print(f"    Red: {red_shifted.shape}")
@@ -212,6 +238,12 @@ def main():
                        help='Pixels to shift red band down for alignment with blue (default: 396)')
     parser.add_argument('--green-shift', type=int, default=612,
                        help='Pixels to shift green band down for alignment with blue (default: 612)')
+    parser.add_argument('--red-x-shift', type=int, default=0,
+                       help='Pixels to shift red band horizontally (positive=right, negative=left, default: 0)')
+    parser.add_argument('--green-x-shift', type=int, default=0,
+                       help='Pixels to shift green band horizontally (positive=right, negative=left, default: 0)')
+    parser.add_argument('--blue-x-shift', type=int, default=0,
+                       help='Pixels to shift blue band horizontally (positive=right, negative=left, default: 0)')
 
     args = parser.parse_args()
 
@@ -279,7 +311,7 @@ def main():
 
     # Create RGB image
     print(f"\nCreating RGB image...")
-    rgb_image = create_rgb_image(red_band, green_band, blue_band, args.enhance_contrast, args.red_shift, args.green_shift)
+    rgb_image = create_rgb_image(red_band, green_band, blue_band, args.enhance_contrast, args.red_shift, args.green_shift, args.red_x_shift, args.green_x_shift, args.blue_x_shift)
 
     # Save RGB image
     contrast_suffix = "_enhanced" if args.enhance_contrast else "_simple"
