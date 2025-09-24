@@ -2,3 +2,4 @@ IPS_Dataset/
 pushbroom_*.tiff
 shift_*.png
 single_*.tiff
+pushbroom_rgb_*.png
