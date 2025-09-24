@@ -383,7 +383,7 @@ def create_aligned_pushbroom_image(band_data_list, band_name, shifts_list, fps_p
     return pushbroom
 
 
-def create_shift_metrics_plot(shifts_list, correlations_list, rmse_list, combined_scores_list, num_images):
+def create_shift_metrics_plot(shifts_list, correlations_list, rmse_list, combined_scores_list, num_images, start_image=0):
     """
     Create a visualization showing shift parameters and metrics as a function of image index.
     
@@ -484,7 +484,7 @@ def create_shift_metrics_plot(shifts_list, correlations_list, rmse_list, combine
     plt.tight_layout()
     
     # Save the plot
-    plot_filename = f"shift_metrics_analysis_{num_images}images.png"
+    plot_filename = f"shift_metrics_analysis_{num_images}images_start{start_image}.png"
     plt.savefig(plot_filename, dpi=300, bbox_inches='tight')
     print(f"  Saved plot: {plot_filename}")
     
@@ -525,7 +525,9 @@ def main():
                        help='Include edge region in correlation analysis')
     parser.add_argument('--edge-x-width', type=int, default=32,
                        help='Width of edge region to exclude from left side (default: 32)')
-    
+    parser.add_argument('--start-image', type=int, default=0,
+                       help='Starting image index (0-based) for pushbroom processing (default: 0)')
+
     args = parser.parse_args()
     
     # Configuration variables
@@ -533,6 +535,7 @@ def main():
     num_images = args.num_images
     exclude_edge_x = args.exclude_edge_x
     edge_x_width = args.edge_x_width
+    start_image = args.start_image
     
     # Path to the dataset
     dataset_path = Path("IPS_Dataset")
@@ -549,11 +552,21 @@ def main():
         return
     
     print(f"Found {len(tiff_files)} TIFF files")
-    print(f"Configuration: {fps_pixels} pixels per second, processing {num_images} images")
-    
-    # Process specified number of images
-    num_images = min(num_images, len(tiff_files))
-    print(f"Processing first {num_images} images for pushbroom creation...")
+    print(f"Configuration: {fps_pixels} pixels per second, processing {num_images} images, starting from index {start_image}")
+
+    # Validate start_image parameter
+    if start_image < 0:
+        print(f"Error: start-image index cannot be negative. Got: {start_image}")
+        return
+    if start_image >= len(tiff_files):
+        print(f"Error: start-image index {start_image} is beyond available files ({len(tiff_files)} files found)")
+        return
+
+    # Calculate the range of images to process
+    end_image = min(start_image + num_images, len(tiff_files))
+    actual_num_images = end_image - start_image
+
+    print(f"Processing images {start_image} to {end_image-1} ({actual_num_images} images total) for pushbroom creation...")
     
     # Initialize band data storage
     band_data_lists = {
@@ -564,9 +577,10 @@ def main():
         'green_pan': []
     }
     
-    # Process each image
-    for i, tiff_file in enumerate(tiff_files[:num_images]):
-        print(f"\nProcessing image {i+1}/{num_images}: {tiff_file.name}")
+    # Process each image in the specified range
+    for i, tiff_file in enumerate(tiff_files[start_image:end_image]):
+        image_index = start_image + i
+        print(f"\nProcessing image {image_index+1}/{len(tiff_files)} (local {i+1}/{actual_num_images}): {tiff_file.name}")
         
         # Read the 10-bit GeoTIFF
         image_data = read_geotiff_10bit(tiff_file)
@@ -613,11 +627,11 @@ def main():
             print(f"  Shift for pair {i+1}->{i+2}: X={x_shift}, Y={y_shift}")
             print(f"  Metrics: Corr={correlation:.4f}, RMSE={rmse:.2f}, Combined={combined_score:.4f}")
     
-    print(f"\nCalculated {len(shifts_list)} shift pairs for {num_images} images")
+    print(f"\nCalculated {len(shifts_list)} shift pairs for {actual_num_images} images")
     
     # Create visualization of shift parameters and metrics
     if len(shifts_list) > 0:
-        create_shift_metrics_plot(shifts_list, correlations_list, rmse_list, combined_scores_list, num_images)
+        create_shift_metrics_plot(shifts_list, correlations_list, rmse_list, combined_scores_list, actual_num_images, start_image)
     
     # Create aligned pushbroom images for each band
     print(f"\nCreating aligned pushbroom images...")
@@ -631,14 +645,14 @@ def main():
             
             if pushbroom is not None:
                 # Save aligned pushbroom image
-                output_path = f"pushbroom_aligned_{band_name}_{num_images}images_{fps_pixels}pxsec.tiff"
+                output_path = f"pushbroom_aligned_{band_name}_{actual_num_images}images_start{start_image}_{fps_pixels}pxsec.tiff"
                 save_10bit_tiff(pushbroom, output_path)
-                
+
                 # Also create non-aligned version for comparison
                 print(f"  Creating comparison (non-aligned) {band_name} pushbroom...")
                 pushbroom_original = create_pushbroom_image(band_data_list, band_name, fps_pixels)
                 if pushbroom_original is not None:
-                    output_path_orig = f"pushbroom_original_{band_name}_{num_images}images_{fps_pixels}pxsec.tiff"
+                    output_path_orig = f"pushbroom_original_{band_name}_{actual_num_images}images_start{start_image}_{fps_pixels}pxsec.tiff"
                     save_10bit_tiff(pushbroom_original, output_path_orig)
                 
                 # Also save individual band from first image for reference
@@ -649,7 +663,7 @@ def main():
             print(f"No data available for {band_name} band")
     
     print(f"\nPushbroom processing complete!")
-    print(f"Created pushbroom images for {num_images} images using {fps_pixels} pixels per second")
+    print(f"Created pushbroom images for {actual_num_images} images (starting from index {start_image}) using {fps_pixels} pixels per second")
 
 if __name__ == "__main__":
     main()
