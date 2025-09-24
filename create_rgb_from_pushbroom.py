@@ -10,6 +10,8 @@ from pathlib import Path
 import argparse
 import matplotlib.pyplot as plt
 from scipy import ndimage
+import rasterio
+from rasterio.transform import from_bounds
 
 def read_pushbroom_tiff(file_path):
     """
@@ -60,7 +62,7 @@ def extract_rgb_bands(pushbroom_data, band_ranges):
 
     return red_band, green_band, blue_band
 
-def normalize_band_for_display(band_data, percentile_clip=(2, 98)):
+def normalize_band_for_display(band_data, percentile_clip=(2, 98), bits=8):
     """
     Normalize band data for display using percentile clipping.
 
@@ -80,7 +82,12 @@ def normalize_band_for_display(band_data, percentile_clip=(2, 98)):
     normalized = (clipped - low_val) / (high_val - low_val)
 
     # Convert to 0-255 uint8
-    normalized_uint8 = (normalized * 255).astype(np.uint8)
+    if bits == 8:
+        normalized_uint8 = (normalized * 255).astype(np.uint8)
+    elif bits == 10:
+        normalized_uint8 = (normalized * 1023).astype(np.uint16)
+    else:
+        raise ValueError("Unsupported bit depth. Use 8 or 10.")
 
     return normalized_uint8
 
@@ -332,6 +339,45 @@ def save_rgb_image(rgb_image, output_path):
     rgb_pil.save(output_path)
     print(f"  Saved RGB image: {output_path}")
 
+def save_rgb_geotiff(rgb_image, output_path, transform=None, crs='EPSG:4326'):
+    """
+    Save RGB image as GeoTIFF file with proper georeferencing in 10-bit format.
+
+    Args:
+        rgb_image (numpy.ndarray): RGB image data (height, width, 3)
+        output_path (str): Output GeoTIFF file path
+        transform (rasterio.transform.Affine, optional): Geospatial transform
+        crs (str): Coordinate reference system (default: 'EPSG:4326')
+    """
+    height, width, bands = rgb_image.shape
+
+    # Convert to 10-bit (0-1023 range)
+    rgb_10bit = (rgb_image.astype(np.float32) / 255.0 * 1023.0).astype(np.uint16)
+
+    # Create default transform if none provided (basic pixel coordinates)
+    if transform is None:
+        transform = from_bounds(0, 0, width, height, width, height)
+
+    # Save as GeoTIFF with RGB bands in 10-bit
+    with rasterio.open(
+        output_path,
+        'w',
+        driver='GTiff',
+        height=height,
+        width=width,
+        count=bands,
+        dtype='uint16',
+        crs=crs,
+        transform=transform,
+        photometric='RGB',
+        compress='lzw'
+    ) as dst:
+        # Write each RGB band
+        for band_idx in range(bands):
+            dst.write(rgb_10bit[:, :, band_idx], band_idx + 1)
+
+    print(f"  Saved RGB GeoTIFF (10-bit): {output_path}")
+
 def main():
     """Main function to create RGB images from pushbroom TIFF files."""
 
@@ -567,13 +613,18 @@ def main():
 
     print(f"  Final RGB image: {rgb_image.shape}")
 
-    # Save RGB image
+    # Save RGB image as PNG
     contrast_suffix = "_enhanced" if args.enhance_contrast else "_simple"
-    output_filename = f"pushbroom_rgb{contrast_suffix}.png"
-    save_rgb_image(rgb_image, output_filename)
+    output_filename_png = f"pushbroom_rgb{contrast_suffix}.png"
+    save_rgb_image(rgb_image, output_filename_png)
+
+    # Save RGB image as GeoTIFF
+    output_filename_tiff = f"pushbroom_rgb{contrast_suffix}.tiff"
+    save_rgb_geotiff(rgb_image, output_filename_tiff)
 
     print(f"\nRGB creation complete!")
-    print(f"Output saved as: {output_filename}")
+    print(f"PNG output saved as: {output_filename_png}")
+    print(f"GeoTIFF output saved as: {output_filename_tiff}")
 
 if __name__ == "__main__":
     main()
