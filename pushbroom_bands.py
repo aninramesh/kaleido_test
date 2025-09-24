@@ -219,24 +219,24 @@ def calculate_shift_for_pair(args):
     Calculate shift between a pair of images. Designed for parallel processing.
 
     Args:
-        args: Tuple containing (green_pan_1, green_pan_2, i, x_range, y_range, exclude_edge_x, edge_x_width)
+        args: Tuple containing (band_data_1, band_data_2, i, band_name, x_range, y_range, exclude_edge_x, edge_x_width)
 
     Returns:
-        tuple: (i, x_shift, y_shift, correlation, rmse, combined_score)
+        tuple: (i, band_name, x_shift, y_shift, correlation, rmse, combined_score)
     """
-    green_pan_1, green_pan_2, i, x_range, y_range, exclude_edge_x, edge_x_width = args
+    band_data_1, band_data_2, i, band_name, x_range, y_range, exclude_edge_x, edge_x_width = args
 
-    print(f"  Calculating shift between image {i+1} and {i+2} (parallel worker)")
+    print(f"  Calculating shift between image {i+1} and {i+2} for {band_name} band (parallel worker)")
 
     x_shift, y_shift, correlation, rmse, combined_score = calculate_autocorrelation_with_rmse(
-        green_pan_1, green_pan_2,
+        band_data_1, band_data_2,
         x_range=x_range,
         y_range=y_range,
         exclude_edge_x=exclude_edge_x,
         edge_x_width=edge_x_width
     )
 
-    return (i, x_shift, y_shift, correlation, rmse, combined_score)
+    return (i, band_name, x_shift, y_shift, correlation, rmse, combined_score)
 
 
 def extract_new_pushbroom_data(band_data, x_shift, y_shift, reference_width):
@@ -344,18 +344,19 @@ def create_pushbroom_image(band_data_list, band_name, fps_pixels=25):
     return pushbroom
 
 
-def create_aligned_pushbroom_image(band_data_list, band_name, shifts_list, fps_pixels=25):
+def create_aligned_pushbroom_image(band_data_list, band_name, shifts_list, fps_pixels=25, band_specific_shifts=None):
     """
     Create a pushbroom image by stitching band images with autocorrelation-based alignment.
     - First image: use all pixels (reference)
     - Subsequent images: use fps_pixels from aligned positions based on calculated shifts
-    
+
     Args:
         band_data_list (list): List of band data arrays
         band_name (str): Name of the band
-        shifts_list (list): List of (x_shift, y_shift) tuples for each image pair
+        shifts_list (list): List of (x_shift, y_shift) tuples for each image pair (used if band_specific_shifts is None)
         fps_pixels (int): Number of pixels to use from each subsequent image
-        
+        band_specific_shifts (dict): Dictionary containing per-band shifts {band_name: [(x_shift, y_shift), ...]}
+
     Returns:
         numpy.ndarray: Stitched aligned pushbroom image
     """
@@ -365,29 +366,37 @@ def create_aligned_pushbroom_image(band_data_list, band_name, shifts_list, fps_p
     # Start with the first image (all pixels, reference)
     pushbroom = band_data_list[0].copy()
     reference_width = band_data_list[0].shape[1]
-    
+
+    # Determine which shifts to use
+    if band_specific_shifts and band_name in band_specific_shifts:
+        current_shifts_list = band_specific_shifts[band_name]
+        print(f"    Using band-specific shifts for {band_name}")
+    else:
+        current_shifts_list = shifts_list
+        print(f"    Using green_pan shifts for {band_name}")
+
     # Track cumulative shifts from the reference image
     cumulative_x_shift = 0
     cumulative_y_shift = 0
-    
+
     # Add aligned pixels from each subsequent image
     for i in range(1, len(band_data_list)):
-        if i-1 < len(shifts_list):  # Make sure we have shift data
+        if i-1 < len(current_shifts_list):  # Make sure we have shift data
             # Get shift for this image pair
-            x_shift, y_shift = shifts_list[i-1]
-            
+            x_shift, y_shift = current_shifts_list[i-1]
+
             # Accumulate shifts from reference
             cumulative_x_shift += x_shift
             cumulative_y_shift += y_shift
-            
+
             print(f"    Image {i+1}: applying cumulative shift X={cumulative_x_shift}, Y={cumulative_y_shift}")
-            
+
             # Extract new pushbroom data using Y-shift to define new content region
             band_data = band_data_list[i]
             new_data = extract_new_pushbroom_data(
                 band_data, cumulative_x_shift, y_shift, reference_width
             )
-            
+
             # Append to the beginning of the pushbroom (newer images at top)
             pushbroom = np.vstack([new_data, pushbroom])
         else:
@@ -549,6 +558,8 @@ def main():
                        help='Width of edge region to exclude from left side (default: 32)')
     parser.add_argument('--start-image', type=int, default=0,
                        help='Starting image index (0-based) for pushbroom processing (default: 0)')
+    parser.add_argument('--per-band-shifts', action='store_true', default=False,
+                       help='Calculate shifts per band using each band\'s autocorrelation instead of using green_pan for all bands (default: False)')
 
     args = parser.parse_args()
     
@@ -558,6 +569,7 @@ def main():
     exclude_edge_x = args.exclude_edge_x
     edge_x_width = args.edge_x_width
     start_image = args.start_image
+    per_band_shifts = args.per_band_shifts
     
     # Path to the dataset
     dataset_path = Path("IPS_Dataset")
@@ -619,43 +631,102 @@ def main():
         else:
             print(f"  Failed to read {tiff_file.name}")
     
-    # Calculate shifts between consecutive images using green_pan band
-    print(f"\nCalculating autocorrelation shifts between consecutive images (parallel processing)...")
-    shifts_list = []
-    correlations_list = []
-    rmse_list = []
-    combined_scores_list = []
+    # Calculate shifts between consecutive images
+    if per_band_shifts:
+        print(f"\nCalculating per-band autocorrelation shifts between consecutive images (parallel processing)...")
+        band_specific_shifts = {}
+        all_correlations_list = {}
+        all_rmse_list = {}
+        all_combined_scores_list = {}
 
-    if len(band_data_lists['green_pan']) >= 2:
-        # Prepare arguments for parallel processing
-        shift_args = []
-        for i in range(len(band_data_lists['green_pan']) - 1):
-            green_pan_1 = band_data_lists['green_pan'][i]
-            green_pan_2 = band_data_lists['green_pan'][i+1]
-            args = (green_pan_1, green_pan_2, i, (-7, 7), (20, 39), exclude_edge_x, edge_x_width)
-            shift_args.append(args)
+        # Calculate shifts for each band
+        for band_name in band_data_lists.keys():
+            if len(band_data_lists[band_name]) >= 2:
+                print(f"\n  Calculating shifts for {band_name} band...")
 
-        # Determine number of processes to use (don't exceed number of CPU cores)
-        num_processes = min(len(shift_args), cpu_count())
-        print(f"  Using {num_processes} parallel processes for {len(shift_args)} shift calculations")
+                # Prepare arguments for parallel processing
+                shift_args = []
+                for i in range(len(band_data_lists[band_name]) - 1):
+                    band_data_1 = band_data_lists[band_name][i]
+                    band_data_2 = band_data_lists[band_name][i+1]
+                    args = (band_data_1, band_data_2, i, band_name, (-7, 7), (20, 39), exclude_edge_x, edge_x_width)
+                    shift_args.append(args)
 
-        # Calculate shifts in parallel
-        with Pool(processes=num_processes) as pool:
-            results = pool.map(calculate_shift_for_pair, shift_args)
+                # Determine number of processes to use (don't exceed number of CPU cores)
+                num_processes = min(len(shift_args), cpu_count())
+                print(f"    Using {num_processes} parallel processes for {len(shift_args)} shift calculations")
 
-        # Sort results by image pair index and extract data
-        results.sort(key=lambda x: x[0])  # Sort by image pair index (i)
+                # Calculate shifts in parallel
+                with Pool(processes=num_processes) as pool:
+                    results = pool.map(calculate_shift_for_pair, shift_args)
 
-        for i, x_shift, y_shift, correlation, rmse, combined_score in results:
-            shifts_list.append((x_shift, y_shift))
-            correlations_list.append(correlation)
-            rmse_list.append(rmse)
-            combined_scores_list.append(combined_score)
+                # Sort results by image pair index and extract data
+                results.sort(key=lambda x: x[0])  # Sort by image pair index (i)
 
-            print(f"  Shift for pair {i+1}->{i+2}: X={x_shift}, Y={y_shift}")
-            print(f"  Metrics: Corr={correlation:.4f}, RMSE={rmse:.2f}, Combined={combined_score:.4f}")
+                band_shifts = []
+                band_correlations = []
+                band_rmse = []
+                band_combined_scores = []
 
-    print(f"\nCalculated {len(shifts_list)} shift pairs for {actual_num_images} images")
+                for i, returned_band_name, x_shift, y_shift, correlation, rmse, combined_score in results:
+                    band_shifts.append((x_shift, y_shift))
+                    band_correlations.append(correlation)
+                    band_rmse.append(rmse)
+                    band_combined_scores.append(combined_score)
+
+                    print(f"    {band_name} shift for pair {i+1}->{i+2}: X={x_shift}, Y={y_shift}")
+                    print(f"    Metrics: Corr={correlation:.4f}, RMSE={rmse:.2f}, Combined={combined_score:.4f}")
+
+                band_specific_shifts[band_name] = band_shifts
+                all_correlations_list[band_name] = band_correlations
+                all_rmse_list[band_name] = band_rmse
+                all_combined_scores_list[band_name] = band_combined_scores
+
+        print(f"\nCalculated per-band shifts for {actual_num_images} images")
+
+        # Use green_pan shifts for plotting
+        shifts_list = band_specific_shifts.get('green_pan', [])
+        correlations_list = all_correlations_list.get('green_pan', [])
+        rmse_list = all_rmse_list.get('green_pan', [])
+        combined_scores_list = all_combined_scores_list.get('green_pan', [])
+    else:
+        print(f"\nCalculating autocorrelation shifts using green_pan band between consecutive images (parallel processing)...")
+        shifts_list = []
+        correlations_list = []
+        rmse_list = []
+        combined_scores_list = []
+        band_specific_shifts = None
+
+        if len(band_data_lists['green_pan']) >= 2:
+            # Prepare arguments for parallel processing
+            shift_args = []
+            for i in range(len(band_data_lists['green_pan']) - 1):
+                green_pan_1 = band_data_lists['green_pan'][i]
+                green_pan_2 = band_data_lists['green_pan'][i+1]
+                args = (green_pan_1, green_pan_2, i, 'green_pan', (-7, 7), (20, 39), exclude_edge_x, edge_x_width)
+                shift_args.append(args)
+
+            # Determine number of processes to use (don't exceed number of CPU cores)
+            num_processes = min(len(shift_args), cpu_count())
+            print(f"  Using {num_processes} parallel processes for {len(shift_args)} shift calculations")
+
+            # Calculate shifts in parallel
+            with Pool(processes=num_processes) as pool:
+                results = pool.map(calculate_shift_for_pair, shift_args)
+
+            # Sort results by image pair index and extract data
+            results.sort(key=lambda x: x[0])  # Sort by image pair index (i)
+
+            for i, band_name, x_shift, y_shift, correlation, rmse, combined_score in results:
+                shifts_list.append((x_shift, y_shift))
+                correlations_list.append(correlation)
+                rmse_list.append(rmse)
+                combined_scores_list.append(combined_score)
+
+                print(f"  Shift for pair {i+1}->{i+2}: X={x_shift}, Y={y_shift}")
+                print(f"  Metrics: Corr={correlation:.4f}, RMSE={rmse:.2f}, Combined={combined_score:.4f}")
+
+        print(f"\nCalculated {len(shifts_list)} shift pairs for {actual_num_images} images")
     
     # Create visualization of shift parameters and metrics
     if len(shifts_list) > 0:
@@ -663,17 +734,20 @@ def main():
     
     # Create aligned pushbroom images for each band
     print(f"\nCreating aligned pushbroom images...")
-    
+
     for band_name, band_data_list in band_data_lists.items():
         if band_data_list:
             print(f"\nCreating {band_name} aligned pushbroom...")
-            
+
             # Create aligned pushbroom image using calculated shifts
-            pushbroom = create_aligned_pushbroom_image(band_data_list, band_name, shifts_list, fps_pixels)
-            
+            pushbroom = create_aligned_pushbroom_image(
+                band_data_list, band_name, shifts_list, fps_pixels, band_specific_shifts
+            )
+
             if pushbroom is not None:
                 # Save aligned pushbroom image
-                output_path = f"pushbroom_aligned_{band_name}_{actual_num_images}images_start{start_image}_{fps_pixels}pxsec.tiff"
+                shift_type = "perband" if per_band_shifts else "greenpan"
+                output_path = f"pushbroom_aligned_{band_name}_{actual_num_images}images_start{start_image}_{fps_pixels}pxsec_{shift_type}.tiff"
                 save_10bit_tiff(pushbroom, output_path)
         else:
             print(f"No data available for {band_name} band")
