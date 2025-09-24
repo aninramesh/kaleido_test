@@ -217,68 +217,63 @@ def extract_new_pushbroom_data(band_data, x_shift, y_shift, reference_width):
     """
     Extract new pushbroom data using Y-shift to determine the new content region:
     1. Use y[0:y_shift] from the image (this is the new content not overlapping with previous image)
-    2. Apply X-shift for horizontal alignment
-    
+    2. Apply X-shift by spatially offsetting the extracted data in the output array
+
     Args:
         band_data (numpy.ndarray): Band data to extract from
-        x_shift (int): X-axis shift for alignment (positive = shifted right)
+        x_shift (int): Cumulative X-axis shift from reference (positive = shifted right)
         y_shift (int): Y-axis shift that defines how much new content is available
         reference_width (int): Width of the reference image to match
-        
+
     Returns:
-        numpy.ndarray: Extracted new data with reference_width
+        numpy.ndarray: Extracted new data with spatial X-shift applied, padded to reference_width
     """
-    print(f"      Extracting new data y[0:{y_shift}] with X-shift={x_shift}")
-    
+    print(f"      Extracting new data y[0:{y_shift}] with cumulative X-shift={x_shift}")
+
     # Extract y[0:y_shift] - this is the new content region
     start_y = 0
     end_y = min(y_shift, band_data.shape[0])
-    
+
     # If y_shift is larger than image height, use all available rows
     if y_shift > band_data.shape[0]:
         print(f"      Warning: y_shift={y_shift} > image height={band_data.shape[0]}, using all available rows")
         end_y = band_data.shape[0]
-    
-    # Apply X-shift for horizontal alignment
+
+    # Extract the full width new content region first
+    extracted = band_data[start_y:end_y, :]
+    print(f"      Extracted base region: y[{start_y}:{end_y}], x[0:{band_data.shape[1]}], shape={extracted.shape}")
+
+    # Create output array with reference width, initialized to zeros
+    output_height = extracted.shape[0]
+    output_array = np.zeros((output_height, reference_width), dtype=extracted.dtype)
+
+    # Apply spatial X-shift by placing the extracted data at the shifted position
     if x_shift >= 0:
-        # Image shifted right relative to reference
-        # To align, extract from the right side of the image
-        start_x = 0
-        end_x = min(reference_width, band_data.shape[1] - x_shift)
-    else:
-        # Image shifted left relative to reference  
-        # To align, extract from the left side, offset by the shift amount
-        start_x = -x_shift
-        end_x = min(start_x + reference_width, band_data.shape[1])
-    
-    # Ensure valid extraction bounds
-    start_x = max(0, start_x)
-    end_x = max(start_x, min(end_x, band_data.shape[1]))
-    
-    print(f"      Extraction bounds: y[{start_y}:{end_y}], x[{start_x}:{end_x}]")
-    
-    # Extract the new data region
-    extracted = band_data[start_y:end_y, start_x:end_x]
-    
-    print(f"      Extracted shape before padding: {extracted.shape}")
-    
-    # Ensure width matches reference_width by padding if needed
-    current_width = extracted.shape[1]
-    if current_width < reference_width:
-        padding_needed = reference_width - current_width
-        if x_shift >= 0:
-            # Pad on the right (image shifted right, so pad right side)
-            extracted = np.pad(extracted, ((0, 0), (0, padding_needed)), mode='constant', constant_values=0)
+        # Positive shift: place data shifted to the right
+        start_col = x_shift
+        end_col = min(start_col + extracted.shape[1], reference_width)
+        source_end_col = end_col - start_col
+
+        if start_col < reference_width:
+            output_array[:, start_col:end_col] = extracted[:, :source_end_col]
+            print(f"      Applied positive X-shift: placed data at x[{start_col}:{end_col}]")
         else:
-            # Pad on the left (image shifted left, so pad left side)
-            extracted = np.pad(extracted, ((0, 0), (padding_needed, 0)), mode='constant', constant_values=0)
-    elif current_width > reference_width:
-        # Truncate if too wide
-        extracted = extracted[:, :reference_width]
-    
-    print(f"      Final extracted shape: {extracted.shape}")
-    
-    return extracted
+            print(f"      Warning: X-shift={x_shift} places data completely outside reference width")
+    else:
+        # Negative shift: place data shifted to the left (crop left side of extracted data)
+        source_start_col = -x_shift
+        source_end_col = min(source_start_col + reference_width, extracted.shape[1])
+        dest_end_col = source_end_col - source_start_col
+
+        if source_start_col < extracted.shape[1]:
+            output_array[:, :dest_end_col] = extracted[:, source_start_col:source_end_col]
+            print(f"      Applied negative X-shift: used source x[{source_start_col}:{source_end_col}] -> dest x[0:{dest_end_col}]")
+        else:
+            print(f"      Warning: X-shift={x_shift} crops all data outside source width")
+
+    print(f"      Final output shape: {output_array.shape}")
+
+    return output_array
 
 
 def create_pushbroom_image(band_data_list, band_name, fps_pixels=25):
