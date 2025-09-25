@@ -76,6 +76,144 @@ def extract_bands(image_data, verbose=False):
     return bands
 
 
+def calculate_phase_correlation_with_rmse(img1, img2, x_range=(-10, 10), y_range=(18, 40), exclude_edge_x=True, edge_x_width=32, verbose=False):
+    """
+    Calculate combined metric using phase correlation and RMSE for finding best shift.
+    Phase correlation uses normalized cross-power spectrum for better noise robustness.
+    Positive y_shift means img2 is shifted UP relative to img1.
+    Positive x_shift means img2 is shifted right relative to img1.
+
+    Args:
+        img1 (numpy.ndarray): First image (reference)
+        img2 (numpy.ndarray): Second image to correlate (will be shifted)
+        x_range (tuple): Range of x-axis shifts to test (min, max) - can be negative
+        y_range (tuple): Range of y-axis shifts to test (min, max) - positive values
+        exclude_edge_x (bool): Whether to exclude problematic edge regions from analysis (default: True)
+        edge_x_width (int): Width of edge region to exclude from left side (default: 32)
+        verbose (bool): Enable verbose output for detailed processing information
+
+    Returns:
+        tuple: (best_x_shift, best_y_shift, max_correlation, min_rmse, best_combined_score)
+    """
+    if verbose:
+        print(f"    Calculating phase correlation + RMSE...")
+        print(f"    X shift range: {x_range[0]} to {x_range[1]} pixels")
+        print(f"    Y shift range: {y_range[0]} to {y_range[1]} pixels")
+        if exclude_edge_x:
+            print(f"    Excluding edge region: x[0:{edge_x_width}] from analysis")
+
+    # Convert to float for calculations
+    img1_float = img1.astype(np.float32)
+    img2_float = img2.astype(np.float32)
+
+    # Optionally exclude problematic edge region from analysis
+    if exclude_edge_x:
+        img1_float = img1_float[:, edge_x_width:]
+        img2_float = img2_float[:, edge_x_width:]
+        if verbose:
+            print(f"    Analysis region shape after edge exclusion: {img1_float.shape}")
+
+    # Normalize images to have zero mean for phase correlation
+    img1_norm = img1_float - np.mean(img1_float)
+    img2_norm = img2_float - np.mean(img2_float)
+
+    # Pad images to same size for FFT (use larger dimensions)
+    max_h = max(img1_norm.shape[0], img2_norm.shape[0])
+    max_w = max(img1_norm.shape[1], img2_norm.shape[1])
+
+    # Pad to next power of 2 for optimal FFT performance
+    pad_h = 2 ** int(np.ceil(np.log2(max_h * 2)))
+    pad_w = 2 ** int(np.ceil(np.log2(max_w * 2)))
+
+    # Zero-pad images
+    img1_padded = np.zeros((pad_h, pad_w), dtype=np.float32)
+    img2_padded = np.zeros((pad_h, pad_w), dtype=np.float32)
+
+    img1_padded[:img1_norm.shape[0], :img1_norm.shape[1]] = img1_norm
+    img2_padded[:img2_norm.shape[0], :img2_norm.shape[1]] = img2_norm
+
+    # Compute FFT
+    f_img1 = fft2(img1_padded)
+    f_img2 = fft2(img2_padded)
+
+    # Phase correlation: normalize by magnitude to get phase-only correlation
+    cross_power_spectrum = f_img1 * np.conj(f_img2)
+    # Add small epsilon to avoid division by zero
+    eps = 1e-10
+    magnitude = np.abs(cross_power_spectrum) + eps
+    normalized_cross_power = cross_power_spectrum / magnitude
+
+    # Compute phase correlation
+    phase_corr = ifft2(normalized_cross_power).real
+
+    # Shift zero frequency to center
+    phase_corr = np.fft.fftshift(phase_corr)
+
+    # Extract shifts within the specified ranges
+    center_h, center_w = phase_corr.shape[0] // 2, phase_corr.shape[1] // 2
+
+    correlations = []
+    rmse_values = []
+    shift_coords = []
+
+    # Test each shift combination within the specified ranges
+    for y_shift in range(y_range[0], y_range[1] + 1):
+        for x_shift in range(x_range[0], x_range[1] + 1):
+            # Convert shifts to correlation map indices
+            corr_y = center_h - y_shift  # Note: y_shift direction is flipped in correlation
+            corr_x = center_w + x_shift
+
+            # Check bounds
+            if (0 <= corr_y < phase_corr.shape[0] and
+                0 <= corr_x < phase_corr.shape[1]):
+
+                correlation = phase_corr[corr_y, corr_x]
+
+                # Calculate RMSE by applying the shift and comparing overlapping regions
+                rmse = calculate_rmse_for_shift(img1_float, img2_float, x_shift, y_shift)
+
+                correlations.append(correlation)
+                rmse_values.append(rmse)
+                shift_coords.append((x_shift, y_shift))
+
+    # Normalize metrics for combination
+    if len(correlations) > 0:
+        correlations = np.array(correlations)
+        rmse_values = np.array(rmse_values)
+
+        # Normalize correlation to [0, 1]
+        if correlations.max() > correlations.min():
+            norm_correlation = (correlations - correlations.min()) / (correlations.max() - correlations.min())
+        else:
+            norm_correlation = np.ones_like(correlations)
+
+        # Normalize RMSE to [0, 1] and invert (lower RMSE is better)
+        if rmse_values.max() > rmse_values.min():
+            norm_rmse_inverted = 1.0 - (rmse_values - rmse_values.min()) / (rmse_values.max() - rmse_values.min())
+        else:
+            norm_rmse_inverted = np.ones_like(rmse_values)
+
+        # Combined score: weighted combination
+        alpha = 0.7  # Weight for correlation
+        beta = 0.3   # Weight for RMSE
+        combined_scores = alpha * norm_correlation + beta * norm_rmse_inverted
+
+        # Find best shift
+        best_idx = np.argmax(combined_scores)
+        best_x_shift, best_y_shift = shift_coords[best_idx]
+        best_correlation = correlations[best_idx]
+        best_rmse = rmse_values[best_idx]
+        best_combined_score = combined_scores[best_idx]
+
+        print(f"    Best match: X={best_x_shift}, Y={best_y_shift}")
+        print(f"    Correlation={best_correlation:.4f}, RMSE={best_rmse:.2f}, Combined={best_combined_score:.4f}")
+
+        return best_x_shift, best_y_shift, best_correlation, best_rmse, best_combined_score
+    else:
+        print(f"    No valid shifts found in specified range!")
+        return 0, 0, 0, float('inf'), 0
+
+
 def calculate_cross_correlation_with_rmse_fft(img1, img2, x_range=(-10, 10), y_range=(18, 40), exclude_edge_x=True, edge_x_width=32, verbose=False):
     """
     Calculate combined metric using both FFT-based cross-correlation and RMSE for finding best shift.
@@ -409,17 +547,17 @@ def calculate_shift_for_pair(args):
     Calculate shift between a pair of images. Designed for parallel processing.
 
     Args:
-        args: Tuple containing (band_data_1, band_data_2, i, band_name, x_range, y_range, exclude_edge_x, edge_x_width, use_fft, verbose)
+        args: Tuple containing (band_data_1, band_data_2, i, band_name, x_range, y_range, exclude_edge_x, edge_x_width, correlation_method, verbose)
 
     Returns:
         tuple: (i, band_name, x_shift, y_shift, correlation, rmse, combined_score)
     """
-    band_data_1, band_data_2, i, band_name, x_range, y_range, exclude_edge_x, edge_x_width, use_fft, verbose = args
+    band_data_1, band_data_2, i, band_name, x_range, y_range, exclude_edge_x, edge_x_width, correlation_method, verbose = args
 
-    method_str = "FFT-based" if use_fft else "pixel-shift"
+    method_str = {"fft": "FFT-based", "phase": "phase correlation", "pixel": "pixel-shift"}[correlation_method]
     print(f"  Calculating {method_str} shift between image {i+1} and {i+2} for {band_name} band (parallel worker)")
 
-    if use_fft:
+    if correlation_method == "fft":
         x_shift, y_shift, correlation, rmse, combined_score = calculate_cross_correlation_with_rmse_fft(
             band_data_1, band_data_2,
             x_range=x_range,
@@ -428,7 +566,16 @@ def calculate_shift_for_pair(args):
             edge_x_width=edge_x_width,
             verbose=verbose
         )
-    else:
+    elif correlation_method == "phase":
+        x_shift, y_shift, correlation, rmse, combined_score = calculate_phase_correlation_with_rmse(
+            band_data_1, band_data_2,
+            x_range=x_range,
+            y_range=y_range,
+            exclude_edge_x=exclude_edge_x,
+            edge_x_width=edge_x_width,
+            verbose=verbose
+        )
+    else:  # pixel method
         x_shift, y_shift, correlation, rmse, combined_score = calculate_cross_correlation_with_rmse(
             band_data_1, band_data_2,
             x_range=x_range,
@@ -799,8 +946,8 @@ def main():
                        help='Starting image index (0-based) for pushbroom processing (default: 0)')
     parser.add_argument('--per-band-shifts', action='store_true', default=False,
                        help='Calculate shifts per band using each band\'s cross-correlation instead of using green_pan for all bands (default: False)')
-    parser.add_argument('--fft', action='store_true', default=False,
-                       help='Use 2D FFT-based cross-correlation instead of pixel-shift method (default: False)')
+    parser.add_argument('--correlation-method', choices=['pixel', 'fft', 'phase'], default='pixel',
+                       help='Correlation method to use: pixel (pixel-shift), fft (FFT-based), phase (phase correlation) (default: pixel)')
     parser.add_argument('--verbose', '-v', action='store_true', default=False,
                        help='Enable verbose output with detailed processing information (default: False)')
 
@@ -813,8 +960,10 @@ def main():
     edge_x_width = args.edge_x_width
     start_image = args.start_image
     per_band_shifts = args.per_band_shifts
-    use_fft = args.fft
     verbose = args.verbose
+
+    # Set correlation method
+    correlation_method = args.correlation_method
 
     # Cross-correlation search ranges
     x_range = (-12, 12)  # X-axis shift range (pixels)
@@ -838,7 +987,7 @@ def main():
         return
     
     print(f"Found {len(tiff_files)} TIFF files")
-    method_str = "FFT-based" if use_fft else "pixel-shift"
+    method_str = {"fft": "FFT-based", "phase": "phase correlation", "pixel": "pixel-shift"}[correlation_method]
     print(f"Configuration: {fps_pixels} pixels per second, processing {num_images} images, starting from index {start_image}")
     print(f"Cross-correlation method: {method_str}")
 
@@ -904,7 +1053,7 @@ def main():
                 for i in range(len(band_data_lists[band_name]) - 1):
                     band_data_1 = band_data_lists[band_name][i]
                     band_data_2 = band_data_lists[band_name][i+1]
-                    args = (band_data_1, band_data_2, i, band_name, x_range, y_range, exclude_edge_x, edge_x_width, use_fft, verbose)
+                    args = (band_data_1, band_data_2, i, band_name, x_range, y_range, exclude_edge_x, edge_x_width, correlation_method, verbose)
                     shift_args.append(args)
 
                 # Determine number of processes to use (don't exceed number of CPU cores)
@@ -958,7 +1107,7 @@ def main():
             for i in range(len(band_data_lists['green_pan']) - 1):
                 green_pan_1 = band_data_lists['green_pan'][i]
                 green_pan_2 = band_data_lists['green_pan'][i+1]
-                args = (green_pan_1, green_pan_2, i, 'green_pan', x_range, y_range, exclude_edge_x, edge_x_width, use_fft, verbose)
+                args = (green_pan_1, green_pan_2, i, 'green_pan', x_range, y_range, exclude_edge_x, edge_x_width, correlation_method, verbose)
                 shift_args.append(args)
 
             # Determine number of processes to use (don't exceed number of CPU cores)
@@ -1007,8 +1156,7 @@ def main():
             if pushbroom is not None:
                 # Save aligned pushbroom image
                 shift_type = "perband" if per_band_shifts else "greenpan"
-                method_suffix = "fft" if use_fft else "pixel"
-                output_path = f"pushbroom_aligned_{band_name}_{actual_num_images}images_start{start_image}_{fps_pixels}pxsec_{shift_type}_{method_suffix}.tiff"
+                output_path = f"pushbroom_aligned_{band_name}_{actual_num_images}images_start{start_image}_{fps_pixels}pxsec_{shift_type}_{correlation_method}.tiff"
                 save_10bit_tiff(pushbroom, output_path)
         else:
             print(f"No data available for {band_name} band")
