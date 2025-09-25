@@ -110,7 +110,8 @@ def calculate_cross_correlation_with_rmse_fft(img1, img2, x_range=(-10, 10), y_r
     if exclude_edge_x:
         img1_float = img1_float[:, edge_x_width:]
         img2_float = img2_float[:, edge_x_width:]
-        print(f"    Analysis region shape after edge exclusion: {img1_float.shape}")
+        if verbose:
+            print(f"    Analysis region shape after edge exclusion: {img1_float.shape}")
 
     # Normalize images to have zero mean and unit variance for correlation
     img1_norm = (img1_float - np.mean(img1_float)) / np.std(img1_float)
@@ -259,7 +260,7 @@ def calculate_rmse_for_shift(img1, img2, x_shift, y_shift):
     return float('inf')  # Return infinite RMSE if no valid overlap
 
 
-def calculate_cross_correlation_with_rmse(img1, img2, x_range=(-10, 10), y_range=(18, 40), exclude_edge_x=True, edge_x_width=32):
+def calculate_cross_correlation_with_rmse(img1, img2, x_range=(-10, 10), y_range=(18, 40), exclude_edge_x=True, edge_x_width=32, verbose=False):
     """
     Calculate combined metric using both cross-correlation and RMSE for finding best shift.
     Positive y_shift means img2 is shifted UP relative to img1.
@@ -276,11 +277,12 @@ def calculate_cross_correlation_with_rmse(img1, img2, x_range=(-10, 10), y_range
     Returns:
         tuple: (best_x_shift, best_y_shift, max_correlation, min_rmse, best_combined_score)
     """
-    print(f"    Calculating cross-correlation + RMSE...")
-    print(f"    X shift range: {x_range[0]} to {x_range[1]} pixels")
-    print(f"    Y shift range: {y_range[0]} to {y_range[1]} pixels")
-    if exclude_edge_x:
-        print(f"    Excluding edge region: x[0:{edge_x_width}] from analysis")
+    if verbose:
+        print(f"    Calculating cross-correlation + RMSE...")
+        print(f"    X shift range: {x_range[0]} to {x_range[1]} pixels")
+        print(f"    Y shift range: {y_range[0]} to {y_range[1]} pixels")
+        if exclude_edge_x:
+            print(f"    Excluding edge region: x[0:{edge_x_width}] from analysis")
     
     # Convert to float for calculations
     img1_float = img1.astype(np.float32)
@@ -290,12 +292,13 @@ def calculate_cross_correlation_with_rmse(img1, img2, x_range=(-10, 10), y_range
     if exclude_edge_x:
         img1_float = img1_float[:, edge_x_width:]
         img2_float = img2_float[:, edge_x_width:]
-        print(f"    Analysis region shape after edge exclusion: {img1_float.shape}")
-    
+        if verbose:
+            print(f"    Analysis region shape after edge exclusion: {img1_float.shape}")
+
     # Normalize images to have zero mean and unit variance for correlation
     img1_norm = (img1_float - np.mean(img1_float)) / np.std(img1_float)
     img2_norm = (img2_float - np.mean(img2_float)) / np.std(img2_float)
-    
+
     # Initialize tracking
     x_shifts = range(x_range[0], x_range[1] + 1)
     y_shifts = range(y_range[0], y_range[1] + 1)
@@ -406,12 +409,12 @@ def calculate_shift_for_pair(args):
     Calculate shift between a pair of images. Designed for parallel processing.
 
     Args:
-        args: Tuple containing (band_data_1, band_data_2, i, band_name, x_range, y_range, exclude_edge_x, edge_x_width, use_fft)
+        args: Tuple containing (band_data_1, band_data_2, i, band_name, x_range, y_range, exclude_edge_x, edge_x_width, use_fft, verbose)
 
     Returns:
         tuple: (i, band_name, x_shift, y_shift, correlation, rmse, combined_score)
     """
-    band_data_1, band_data_2, i, band_name, x_range, y_range, exclude_edge_x, edge_x_width, use_fft = args
+    band_data_1, band_data_2, i, band_name, x_range, y_range, exclude_edge_x, edge_x_width, use_fft, verbose = args
 
     method_str = "FFT-based" if use_fft else "pixel-shift"
     print(f"  Calculating {method_str} shift between image {i+1} and {i+2} for {band_name} band (parallel worker)")
@@ -422,7 +425,8 @@ def calculate_shift_for_pair(args):
             x_range=x_range,
             y_range=y_range,
             exclude_edge_x=exclude_edge_x,
-            edge_x_width=edge_x_width
+            edge_x_width=edge_x_width,
+            verbose=verbose
         )
     else:
         x_shift, y_shift, correlation, rmse, combined_score = calculate_cross_correlation_with_rmse(
@@ -430,7 +434,8 @@ def calculate_shift_for_pair(args):
             x_range=x_range,
             y_range=y_range,
             exclude_edge_x=exclude_edge_x,
-            edge_x_width=edge_x_width
+            edge_x_width=edge_x_width,
+            verbose=verbose
         )
 
     return (i, band_name, x_shift, y_shift, correlation, rmse, combined_score)
@@ -812,8 +817,8 @@ def main():
     verbose = args.verbose
 
     # Cross-correlation search ranges
-    x_range = (-10, 10)  # X-axis shift range (pixels)
-    y_range = (18, 40)   # Y-axis shift range (pixels)
+    x_range = (-12, 12)  # X-axis shift range (pixels)
+    y_range = (16, 40)   # Y-axis shift range (pixels)
 
     # Start the timer
     start_time = time.time()
@@ -899,7 +904,7 @@ def main():
                 for i in range(len(band_data_lists[band_name]) - 1):
                     band_data_1 = band_data_lists[band_name][i]
                     band_data_2 = band_data_lists[band_name][i+1]
-                    args = (band_data_1, band_data_2, i, band_name, x_range, y_range, exclude_edge_x, edge_x_width, use_fft)
+                    args = (band_data_1, band_data_2, i, band_name, x_range, y_range, exclude_edge_x, edge_x_width, use_fft, verbose)
                     shift_args.append(args)
 
                 # Determine number of processes to use (don't exceed number of CPU cores)
@@ -953,7 +958,7 @@ def main():
             for i in range(len(band_data_lists['green_pan']) - 1):
                 green_pan_1 = band_data_lists['green_pan'][i]
                 green_pan_2 = band_data_lists['green_pan'][i+1]
-                args = (green_pan_1, green_pan_2, i, 'green_pan', x_range, y_range, exclude_edge_x, edge_x_width, use_fft)
+                args = (green_pan_1, green_pan_2, i, 'green_pan', x_range, y_range, exclude_edge_x, edge_x_width, use_fft, verbose)
                 shift_args.append(args)
 
             # Determine number of processes to use (don't exceed number of CPU cores)
