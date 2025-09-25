@@ -73,7 +73,7 @@ def extract_bands(image_data):
     return bands
 
 
-def calculate_autocorrelation_with_rmse_fft(img1, img2, x_range=(-6, 6), y_range=(26, 39), exclude_edge_x=True, edge_x_width=32):
+def calculate_cross_correlation_with_rmse_fft(img1, img2, x_range=(-6, 6), y_range=(26, 39), exclude_edge_x=True, edge_x_width=32):
     """
     Calculate combined metric using both FFT-based cross-correlation and RMSE for finding best shift.
     Uses 2D FFT for efficient cross-correlation computation.
@@ -91,7 +91,7 @@ def calculate_autocorrelation_with_rmse_fft(img1, img2, x_range=(-6, 6), y_range
     Returns:
         tuple: (best_x_shift, best_y_shift, max_correlation, min_rmse, best_combined_score)
     """
-    print(f"    Calculating FFT-based autocorrelation + RMSE...")
+    print(f"    Calculating FFT-based cross-correlation + RMSE...")
     print(f"    X shift range: {x_range[0]} to {x_range[1]} pixels")
     print(f"    Y shift range: {y_range[0]} to {y_range[1]} pixels")
     if exclude_edge_x:
@@ -254,9 +254,9 @@ def calculate_rmse_for_shift(img1, img2, x_shift, y_shift):
     return float('inf')  # Return infinite RMSE if no valid overlap
 
 
-def calculate_autocorrelation_with_rmse(img1, img2, x_range=(-6, 6), y_range=(26, 39), exclude_edge_x=True, edge_x_width=32):
+def calculate_cross_correlation_with_rmse(img1, img2, x_range=(-6, 6), y_range=(26, 39), exclude_edge_x=True, edge_x_width=32):
     """
-    Calculate combined metric using both autocorrelation and RMSE for finding best shift.
+    Calculate combined metric using both cross-correlation and RMSE for finding best shift.
     Positive y_shift means img2 is shifted UP relative to img1.
     Positive x_shift means img2 is shifted right relative to img1.
     
@@ -271,7 +271,7 @@ def calculate_autocorrelation_with_rmse(img1, img2, x_range=(-6, 6), y_range=(26
     Returns:
         tuple: (best_x_shift, best_y_shift, max_correlation, min_rmse, best_combined_score)
     """
-    print(f"    Calculating autocorrelation + RMSE...")
+    print(f"    Calculating cross-correlation + RMSE...")
     print(f"    X shift range: {x_range[0]} to {x_range[1]} pixels")
     print(f"    Y shift range: {y_range[0]} to {y_range[1]} pixels")
     if exclude_edge_x:
@@ -412,7 +412,7 @@ def calculate_shift_for_pair(args):
     print(f"  Calculating {method_str} shift between image {i+1} and {i+2} for {band_name} band (parallel worker)")
 
     if use_fft:
-        x_shift, y_shift, correlation, rmse, combined_score = calculate_autocorrelation_with_rmse_fft(
+        x_shift, y_shift, correlation, rmse, combined_score = calculate_cross_correlation_with_rmse_fft(
             band_data_1, band_data_2,
             x_range=x_range,
             y_range=y_range,
@@ -420,7 +420,7 @@ def calculate_shift_for_pair(args):
             edge_x_width=edge_x_width
         )
     else:
-        x_shift, y_shift, correlation, rmse, combined_score = calculate_autocorrelation_with_rmse(
+        x_shift, y_shift, correlation, rmse, combined_score = calculate_cross_correlation_with_rmse(
             band_data_1, band_data_2,
             x_range=x_range,
             y_range=y_range,
@@ -538,7 +538,7 @@ def create_pushbroom_image(band_data_list, band_name, fps_pixels=25):
 
 def create_aligned_pushbroom_image(band_data_list, band_name, shifts_list, fps_pixels=25, band_specific_shifts=None):
     """
-    Create a pushbroom image by stitching band images with autocorrelation-based alignment.
+    Create a pushbroom image by stitching band images with cross-correlation-based alignment.
     - First image: use all pixels (reference)
     - Subsequent images: use fps_pixels from aligned positions based on calculated shifts
 
@@ -601,7 +601,7 @@ def create_aligned_pushbroom_image(band_data_list, band_name, shifts_list, fps_p
                 selected_pixels = band_data
             pushbroom = np.vstack([selected_pixels, pushbroom])
     
-    print(f"  {band_name} aligned pushbroom: shape {pushbroom.shape} (with autocorrelation alignment)")
+    print(f"  {band_name} aligned pushbroom: shape {pushbroom.shape} (with cross-correlation alignment)")
     
     return pushbroom
 
@@ -647,9 +647,22 @@ def create_shift_metrics_plot(shifts_list, correlations_list, rmse_list, combine
     # Image pair indices (1->2, 2->3, etc.)
     pair_indices = list(range(1, len(shifts_list) + 1))
     
-    # Create the plot
-    fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 10))
+    # Create the plot with shared x-axis
+    fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 10), sharex=True)
     fig.suptitle(f'Shift Metrics Analysis for {num_images} Images', fontsize=16, fontweight='bold')
+
+    # Smart x-axis ticker management to avoid crowding
+    num_pairs = len(pair_indices)
+    if num_pairs > 10:
+        # For more than 10 pairs, use at most 10 evenly spaced tickers
+        step = max(1, num_pairs // 10)
+        x_ticks = pair_indices[::step]
+        # Ensure we always include the last tick if it's not already included
+        if pair_indices[-1] not in x_ticks:
+            x_ticks.append(pair_indices[-1])
+    else:
+        # For 10 or fewer pairs, show all ticks
+        x_ticks = pair_indices
     
     # Plot 1: X and Y shifts (individual and cumulative X)
     ax1.plot(pair_indices, x_shifts, 'bo-', label='X Shift (individual)', linewidth=2, markersize=8)
@@ -660,7 +673,7 @@ def create_shift_metrics_plot(shifts_list, correlations_list, rmse_list, combine
     ax1.set_title('X and Y Shifts Between Consecutive Images')
     ax1.legend()
     ax1.grid(True, alpha=0.3)
-    ax1.set_xticks(pair_indices)
+    ax1.set_xticks(x_ticks)
     
     # Plot 2: Correlation values
     ax2.plot(pair_indices, correlations, 'go-', linewidth=2, markersize=8)
@@ -668,7 +681,7 @@ def create_shift_metrics_plot(shifts_list, correlations_list, rmse_list, combine
     ax2.set_ylabel('Correlation Coefficient')
     ax2.set_title('Cross-Correlation Between Consecutive Images')
     ax2.grid(True, alpha=0.3)
-    ax2.set_xticks(pair_indices)
+    ax2.set_xticks(x_ticks)
     ax2.set_ylim([0.9, 1])
     
     # Add correlation values as text annotations
@@ -682,7 +695,7 @@ def create_shift_metrics_plot(shifts_list, correlations_list, rmse_list, combine
     ax3.set_ylabel('Normalized RMSE (inverted)')
     ax3.set_title('Normalized RMSE Between Consecutive Images')
     ax3.grid(True, alpha=0.3)
-    ax3.set_xticks(pair_indices)
+    ax3.set_xticks(x_ticks)
     ax3.set_ylim([0, 1])
     
     # Add RMSE values as text annotations
@@ -696,7 +709,7 @@ def create_shift_metrics_plot(shifts_list, correlations_list, rmse_list, combine
     ax4.set_ylabel('Combined Score')
     ax4.set_title('Combined Metric (0.7×Correlation + 0.3×Norm_RMSE)')
     ax4.grid(True, alpha=0.3)
-    ax4.set_xticks(pair_indices)
+    ax4.set_xticks(x_ticks)
     ax4.set_ylim([0.9, 1])
     
     # Add combined scores as text annotations
@@ -751,7 +764,7 @@ def main():
     parser.add_argument('--start-image', type=int, default=0,
                        help='Starting image index (0-based) for pushbroom processing (default: 0)')
     parser.add_argument('--per-band-shifts', action='store_true', default=False,
-                       help='Calculate shifts per band using each band\'s autocorrelation instead of using green_pan for all bands (default: False)')
+                       help='Calculate shifts per band using each band\'s cross-correlation instead of using green_pan for all bands (default: False)')
     parser.add_argument('--fft', action='store_true', default=False,
                        help='Use 2D FFT-based cross-correlation instead of pixel-shift method (default: False)')
 
@@ -830,7 +843,7 @@ def main():
     
     # Calculate shifts between consecutive images
     if per_band_shifts:
-        print(f"\nCalculating per-band autocorrelation shifts between consecutive images (parallel processing)...")
+        print(f"\nCalculating per-band cross-correlation shifts between consecutive images (parallel processing)...")
         band_specific_shifts = {}
         all_correlations_list = {}
         all_rmse_list = {}
@@ -887,7 +900,7 @@ def main():
         rmse_list = all_rmse_list.get('green_pan', [])
         combined_scores_list = all_combined_scores_list.get('green_pan', [])
     else:
-        print(f"\nCalculating autocorrelation shifts using green_pan band between consecutive images (parallel processing)...")
+        print(f"\nCalculating cross-correlation shifts using green_pan band between consecutive images (parallel processing)...")
         shifts_list = []
         correlations_list = []
         rmse_list = []
