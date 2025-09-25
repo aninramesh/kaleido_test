@@ -12,6 +12,7 @@ import argparse
 from scipy import ndimage
 from scipy.fft import fft2, ifft2
 from multiprocessing import Pool, cpu_count
+import time
 
 def read_geotiff_10bit(file_path):
     """
@@ -73,7 +74,7 @@ def extract_bands(image_data):
     return bands
 
 
-def calculate_cross_correlation_with_rmse_fft(img1, img2, x_range=(-6, 6), y_range=(26, 39), exclude_edge_x=True, edge_x_width=32):
+def calculate_cross_correlation_with_rmse_fft(img1, img2, x_range=(-10, 10), y_range=(18, 40), exclude_edge_x=True, edge_x_width=32):
     """
     Calculate combined metric using both FFT-based cross-correlation and RMSE for finding best shift.
     Uses 2D FFT for efficient cross-correlation computation.
@@ -254,7 +255,7 @@ def calculate_rmse_for_shift(img1, img2, x_shift, y_shift):
     return float('inf')  # Return infinite RMSE if no valid overlap
 
 
-def calculate_cross_correlation_with_rmse(img1, img2, x_range=(-6, 6), y_range=(26, 39), exclude_edge_x=True, edge_x_width=32):
+def calculate_cross_correlation_with_rmse(img1, img2, x_range=(-10, 10), y_range=(18, 40), exclude_edge_x=True, edge_x_width=32):
     """
     Calculate combined metric using both cross-correlation and RMSE for finding best shift.
     Positive y_shift means img2 is shifted UP relative to img1.
@@ -781,6 +782,13 @@ def main():
     start_image = args.start_image
     per_band_shifts = args.per_band_shifts
     use_fft = args.fft
+
+    # Cross-correlation search ranges
+    x_range = (-10, 10)  # X-axis shift range (pixels)
+    y_range = (18, 40)   # Y-axis shift range (pixels)
+
+    # Start the timer
+    start_time = time.time()
     
     # Path to the dataset
     dataset_path = Path("IPS_Dataset")
@@ -862,7 +870,7 @@ def main():
                 for i in range(len(band_data_lists[band_name]) - 1):
                     band_data_1 = band_data_lists[band_name][i]
                     band_data_2 = band_data_lists[band_name][i+1]
-                    args = (band_data_1, band_data_2, i, band_name, (-7, 7), (20, 39), exclude_edge_x, edge_x_width, use_fft)
+                    args = (band_data_1, band_data_2, i, band_name, x_range, y_range, exclude_edge_x, edge_x_width, use_fft)
                     shift_args.append(args)
 
                 # Determine number of processes to use (don't exceed number of CPU cores)
@@ -916,7 +924,7 @@ def main():
             for i in range(len(band_data_lists['green_pan']) - 1):
                 green_pan_1 = band_data_lists['green_pan'][i]
                 green_pan_2 = band_data_lists['green_pan'][i+1]
-                args = (green_pan_1, green_pan_2, i, 'green_pan', (-7, 7), (20, 39), exclude_edge_x, edge_x_width, use_fft)
+                args = (green_pan_1, green_pan_2, i, 'green_pan', x_range, y_range, exclude_edge_x, edge_x_width, use_fft)
                 shift_args.append(args)
 
             # Determine number of processes to use (don't exceed number of CPU cores)
@@ -941,6 +949,11 @@ def main():
 
         print(f"\nCalculated {len(shifts_list)} shift pairs for {actual_num_images} images")
     
+    # End the timer
+    end_time = time.time()
+    elapsed_time = end_time - start_time
+    print(f"\nProcessing time: {elapsed_time:.2f} seconds")
+
     # Create visualization of shift parameters and metrics
     if len(shifts_list) > 0:
         create_shift_metrics_plot(shifts_list, correlations_list, rmse_list, combined_scores_list, actual_num_images, start_image)
