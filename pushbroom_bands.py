@@ -44,13 +44,14 @@ def read_geotiff_10bit(file_path):
             true_10bit = img_array / 16.0
             return true_10bit.astype(np.uint16)
 
-def extract_bands(image_data):
+def extract_bands(image_data, verbose=False):
     """
     Extract the 5 spectral bands from the image data.
-    
+
     Args:
         image_data (numpy.ndarray): Image data with shape (726, 2336)
-        
+        verbose (bool): Enable verbose output for band information
+
     Returns:
         dict: Dictionary containing each band
     """
@@ -69,12 +70,13 @@ def extract_bands(image_data):
         # Extract band (y-direction is first dimension)
         band_data = image_data[start:end, :]
         bands[band_name] = band_data
-        print(f"  {band_name}: shape {band_data.shape}, range {band_data.min()}-{band_data.max()}")
+        if verbose:
+            print(f"  {band_name}: shape {band_data.shape}, range {band_data.min()}-{band_data.max()}")
     
     return bands
 
 
-def calculate_cross_correlation_with_rmse_fft(img1, img2, x_range=(-10, 10), y_range=(18, 40), exclude_edge_x=True, edge_x_width=32):
+def calculate_cross_correlation_with_rmse_fft(img1, img2, x_range=(-10, 10), y_range=(18, 40), exclude_edge_x=True, edge_x_width=32, verbose=False):
     """
     Calculate combined metric using both FFT-based cross-correlation and RMSE for finding best shift.
     Uses 2D FFT for efficient cross-correlation computation.
@@ -88,15 +90,17 @@ def calculate_cross_correlation_with_rmse_fft(img1, img2, x_range=(-10, 10), y_r
         y_range (tuple): Range of y-axis shifts to test (min, max) - positive values
         exclude_edge_x (bool): Whether to exclude problematic edge regions from analysis (default: True)
         edge_x_width (int): Width of edge region to exclude from left side (default: 32)
+        verbose (bool): Enable verbose output for detailed processing information
 
     Returns:
         tuple: (best_x_shift, best_y_shift, max_correlation, min_rmse, best_combined_score)
     """
-    print(f"    Calculating FFT-based cross-correlation + RMSE...")
-    print(f"    X shift range: {x_range[0]} to {x_range[1]} pixels")
-    print(f"    Y shift range: {y_range[0]} to {y_range[1]} pixels")
-    if exclude_edge_x:
-        print(f"    Excluding edge region: x[0:{edge_x_width}] from analysis")
+    if verbose:
+        print(f"    Calculating FFT-based cross-correlation + RMSE...")
+        print(f"    X shift range: {x_range[0]} to {x_range[1]} pixels")
+        print(f"    Y shift range: {y_range[0]} to {y_range[1]} pixels")
+        if exclude_edge_x:
+            print(f"    Excluding edge region: x[0:{edge_x_width}] from analysis")
 
     # Convert to float for calculations
     img1_float = img1.astype(np.float32)
@@ -432,7 +436,7 @@ def calculate_shift_for_pair(args):
     return (i, band_name, x_shift, y_shift, correlation, rmse, combined_score)
 
 
-def extract_new_pushbroom_data(band_data, x_shift, y_shift, reference_width):
+def extract_new_pushbroom_data(band_data, x_shift, y_shift, reference_width, verbose=False):
     """
     Extract new pushbroom data using Y-shift to determine the new content region:
     1. Use y[0:y_shift] from the image (this is the new content not overlapping with previous image)
@@ -443,11 +447,13 @@ def extract_new_pushbroom_data(band_data, x_shift, y_shift, reference_width):
         x_shift (int): Cumulative X-axis shift from reference (positive = shifted right)
         y_shift (int): Y-axis shift that defines how much new content is available
         reference_width (int): Width of the reference image to match
+        verbose (bool): Enable verbose output for detailed processing information
 
     Returns:
         numpy.ndarray: Extracted new data with spatial X-shift applied, padded to reference_width
     """
-    print(f"      Extracting new data y[0:{y_shift}] with cumulative X-shift={x_shift}")
+    if verbose:
+        print(f"      Extracting new data y[0:{y_shift}] with cumulative X-shift={x_shift}")
 
     # Extract y[0:y_shift] - this is the new content region
     start_y = 0
@@ -460,7 +466,8 @@ def extract_new_pushbroom_data(band_data, x_shift, y_shift, reference_width):
 
     # Extract the full width new content region first
     extracted = band_data[start_y:end_y, :]
-    print(f"      Extracted base region: y[{start_y}:{end_y}], x[0:{band_data.shape[1]}], shape={extracted.shape}")
+    if verbose:
+        print(f"      Extracted base region: y[{start_y}:{end_y}], x[0:{band_data.shape[1]}], shape={extracted.shape}")
 
     # Create output array with reference width, initialized to zeros
     output_height = extracted.shape[0]
@@ -475,9 +482,11 @@ def extract_new_pushbroom_data(band_data, x_shift, y_shift, reference_width):
 
         if start_col < reference_width:
             output_array[:, start_col:end_col] = extracted[:, :source_end_col]
-            print(f"      Applied positive X-shift: placed data at x[{start_col}:{end_col}]")
+            if verbose:
+                print(f"      Applied positive X-shift: placed data at x[{start_col}:{end_col}]")
         else:
-            print(f"      Warning: X-shift={x_shift} places data completely outside reference width")
+            if verbose:
+                print(f"      Warning: X-shift={x_shift} places data completely outside reference width")
     else:
         # Negative shift: place data shifted to the left (crop left side of extracted data)
         source_start_col = -x_shift
@@ -486,11 +495,14 @@ def extract_new_pushbroom_data(band_data, x_shift, y_shift, reference_width):
 
         if source_start_col < extracted.shape[1]:
             output_array[:, :dest_end_col] = extracted[:, source_start_col:source_end_col]
-            print(f"      Applied negative X-shift: used source x[{source_start_col}:{source_end_col}] -> dest x[0:{dest_end_col}]")
+            if verbose:
+                print(f"      Applied negative X-shift: used source x[{source_start_col}:{source_end_col}] -> dest x[0:{dest_end_col}]")
         else:
-            print(f"      Warning: X-shift={x_shift} crops all data outside source width")
+            if verbose:
+                print(f"      Warning: X-shift={x_shift} crops all data outside source width")
 
-    print(f"      Final output shape: {output_array.shape}")
+    if verbose:
+        print(f"      Final output shape: {output_array.shape}")
 
     return output_array
 
@@ -537,7 +549,7 @@ def create_pushbroom_image(band_data_list, band_name, fps_pixels=25):
     return pushbroom
 
 
-def create_aligned_pushbroom_image(band_data_list, band_name, shifts_list, fps_pixels=25, band_specific_shifts=None):
+def create_aligned_pushbroom_image(band_data_list, band_name, shifts_list, fps_pixels=25, band_specific_shifts=None, verbose=False):
     """
     Create a pushbroom image by stitching band images with cross-correlation-based alignment.
     - First image: use all pixels (reference)
@@ -549,6 +561,7 @@ def create_aligned_pushbroom_image(band_data_list, band_name, shifts_list, fps_p
         shifts_list (list): List of (x_shift, y_shift) tuples for each image pair (used if band_specific_shifts is None)
         fps_pixels (int): Number of pixels to use from each subsequent image
         band_specific_shifts (dict): Dictionary containing per-band shifts {band_name: [(x_shift, y_shift), ...]}
+        verbose (bool): Enable verbose output for detailed processing information
 
     Returns:
         numpy.ndarray: Stitched aligned pushbroom image
@@ -587,7 +600,7 @@ def create_aligned_pushbroom_image(band_data_list, band_name, shifts_list, fps_p
             # Extract new pushbroom data using Y-shift to define new content region
             band_data = band_data_list[i]
             new_data = extract_new_pushbroom_data(
-                band_data, cumulative_x_shift, y_shift, reference_width
+                band_data, cumulative_x_shift, y_shift, reference_width, verbose
             )
 
             # Append to the beginning of the pushbroom (newer images at top)
@@ -607,16 +620,19 @@ def create_aligned_pushbroom_image(band_data_list, band_name, shifts_list, fps_p
     return pushbroom
 
 
-def create_shift_metrics_plot(shifts_list, correlations_list, rmse_list, combined_scores_list, num_images, start_image=0):
+def create_shift_metrics_plot(shifts_list, correlations_list, rmse_list, combined_scores_list, num_images, start_image=0, x_range=None, y_range=None):
     """
     Create a visualization showing shift parameters and metrics as a function of image index.
-    
+
     Args:
         shifts_list (list): List of (x_shift, y_shift) tuples
         correlations_list (list): List of correlation values
         rmse_list (list): List of RMSE values
         combined_scores_list (list): List of combined scores
         num_images (int): Total number of images processed
+        start_image (int): Starting image index for display
+        x_range (tuple): X-axis search range for reference lines (min, max)
+        y_range (tuple): Y-axis search range for reference lines (min, max)
     """
     print(f"\nCreating shift metrics visualization...")
     
@@ -672,6 +688,15 @@ def create_shift_metrics_plot(shifts_list, correlations_list, rmse_list, combine
     ax1.plot(pair_indices, x_shifts, 'bo-', label='X Shift (individual)', linewidth=2, markersize=8)
     ax1.plot(pair_indices, cumulative_x_shifts, 'co-', label='X Shift (cumulative)', linewidth=2, markersize=8)
     ax1.plot(pair_indices, y_shifts, 'ro-', label='Y Shift', linewidth=2, markersize=8)
+
+    # Add horizontal reference lines for search range limits
+    if x_range is not None:
+        ax1.axhline(y=x_range[0], color='blue', linestyle='--', alpha=0.6, linewidth=1, label=f'X range: [{x_range[0]}, {x_range[1]}]')
+        ax1.axhline(y=x_range[1], color='blue', linestyle='--', alpha=0.6, linewidth=1)
+    if y_range is not None:
+        ax1.axhline(y=y_range[0], color='red', linestyle=':', alpha=0.6, linewidth=1, label=f'Y range: [{y_range[0]}, {y_range[1]}]')
+        ax1.axhline(y=y_range[1], color='red', linestyle=':', alpha=0.6, linewidth=1)
+
     ax1.set_xlabel('Image Pair Index')
     ax1.set_ylabel('Shift (pixels)')
     ax1.set_title('X and Y Shifts Between Consecutive Images')
@@ -771,6 +796,8 @@ def main():
                        help='Calculate shifts per band using each band\'s cross-correlation instead of using green_pan for all bands (default: False)')
     parser.add_argument('--fft', action='store_true', default=False,
                        help='Use 2D FFT-based cross-correlation instead of pixel-shift method (default: False)')
+    parser.add_argument('--verbose', '-v', action='store_true', default=False,
+                       help='Enable verbose output with detailed processing information (default: False)')
 
     args = parser.parse_args()
     
@@ -782,6 +809,7 @@ def main():
     start_image = args.start_image
     per_band_shifts = args.per_band_shifts
     use_fft = args.fft
+    verbose = args.verbose
 
     # Cross-correlation search ranges
     x_range = (-10, 10)  # X-axis shift range (pixels)
@@ -841,10 +869,11 @@ def main():
         image_data = read_geotiff_10bit(tiff_file)
         
         if image_data is not None:
-            print(f"  Image shape: {image_data.shape}")
+            if verbose:
+                print(f"  Image shape: {image_data.shape}")
             
             # Extract bands
-            bands = extract_bands(image_data)
+            bands = extract_bands(image_data, verbose)
             
             # Store band data for pushbroom creation
             for band_name, band_data in bands.items():
@@ -956,7 +985,7 @@ def main():
 
     # Create visualization of shift parameters and metrics
     if len(shifts_list) > 0:
-        create_shift_metrics_plot(shifts_list, correlations_list, rmse_list, combined_scores_list, actual_num_images, start_image)
+        create_shift_metrics_plot(shifts_list, correlations_list, rmse_list, combined_scores_list, actual_num_images, start_image, x_range, y_range)
     
     # Create aligned pushbroom images for each band
     print(f"\nCreating aligned pushbroom images...")
@@ -967,7 +996,7 @@ def main():
 
             # Create aligned pushbroom image using calculated shifts
             pushbroom = create_aligned_pushbroom_image(
-                band_data_list, band_name, shifts_list, fps_pixels, band_specific_shifts
+                band_data_list, band_name, shifts_list, fps_pixels, band_specific_shifts, verbose
             )
 
             if pushbroom is not None:
