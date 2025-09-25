@@ -10,6 +10,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import argparse
 from scipy import ndimage
+from scipy.fft import fft2, ifft2
 from multiprocessing import Pool, cpu_count
 
 def read_geotiff_10bit(file_path):
@@ -70,6 +71,187 @@ def extract_bands(image_data):
         print(f"  {band_name}: shape {band_data.shape}, range {band_data.min()}-{band_data.max()}")
     
     return bands
+
+
+def calculate_autocorrelation_with_rmse_fft(img1, img2, x_range=(-6, 6), y_range=(26, 39), exclude_edge_x=True, edge_x_width=32):
+    """
+    Calculate combined metric using both FFT-based cross-correlation and RMSE for finding best shift.
+    Uses 2D FFT for efficient cross-correlation computation.
+    Positive y_shift means img2 is shifted UP relative to img1.
+    Positive x_shift means img2 is shifted right relative to img1.
+
+    Args:
+        img1 (numpy.ndarray): First image (reference)
+        img2 (numpy.ndarray): Second image to correlate (will be shifted)
+        x_range (tuple): Range of x-axis shifts to test (min, max) - can be negative
+        y_range (tuple): Range of y-axis shifts to test (min, max) - positive values
+        exclude_edge_x (bool): Whether to exclude problematic edge regions from analysis (default: True)
+        edge_x_width (int): Width of edge region to exclude from left side (default: 32)
+
+    Returns:
+        tuple: (best_x_shift, best_y_shift, max_correlation, min_rmse, best_combined_score)
+    """
+    print(f"    Calculating FFT-based autocorrelation + RMSE...")
+    print(f"    X shift range: {x_range[0]} to {x_range[1]} pixels")
+    print(f"    Y shift range: {y_range[0]} to {y_range[1]} pixels")
+    if exclude_edge_x:
+        print(f"    Excluding edge region: x[0:{edge_x_width}] from analysis")
+
+    # Convert to float for calculations
+    img1_float = img1.astype(np.float32)
+    img2_float = img2.astype(np.float32)
+
+    # Optionally exclude problematic edge region from analysis
+    if exclude_edge_x:
+        img1_float = img1_float[:, edge_x_width:]
+        img2_float = img2_float[:, edge_x_width:]
+        print(f"    Analysis region shape after edge exclusion: {img1_float.shape}")
+
+    # Normalize images to have zero mean and unit variance for correlation
+    img1_norm = (img1_float - np.mean(img1_float)) / np.std(img1_float)
+    img2_norm = (img2_float - np.mean(img2_float)) / np.std(img2_float)
+
+    # Pad images to same size for FFT (use larger dimensions)
+    max_h = max(img1_norm.shape[0], img2_norm.shape[0])
+    max_w = max(img1_norm.shape[1], img2_norm.shape[1])
+
+    # Pad to next power of 2 for optimal FFT performance
+    pad_h = 2 ** int(np.ceil(np.log2(max_h * 2)))
+    pad_w = 2 ** int(np.ceil(np.log2(max_w * 2)))
+
+    # Zero-pad images
+    img1_padded = np.zeros((pad_h, pad_w), dtype=np.float32)
+    img2_padded = np.zeros((pad_h, pad_w), dtype=np.float32)
+
+    img1_padded[:img1_norm.shape[0], :img1_norm.shape[1]] = img1_norm
+    img2_padded[:img2_norm.shape[0], :img2_norm.shape[1]] = img2_norm
+
+    # Compute FFT-based cross-correlation
+    f_img1 = fft2(img1_padded)
+    f_img2 = fft2(img2_padded)
+
+    # Cross-correlation in frequency domain
+    cross_corr = ifft2(f_img1 * np.conj(f_img2)).real
+
+    # Shift zero frequency to center
+    cross_corr = np.fft.fftshift(cross_corr)
+
+    # Extract shifts within the specified ranges
+    center_h, center_w = cross_corr.shape[0] // 2, cross_corr.shape[1] // 2
+
+    correlations = []
+    rmse_values = []
+    shift_coords = []
+
+    # Test each shift combination within the specified ranges
+    for y_shift in range(y_range[0], y_range[1] + 1):
+        for x_shift in range(x_range[0], x_range[1] + 1):
+            # Convert shifts to correlation map indices
+            corr_y = center_h - y_shift  # Note: y_shift direction is flipped in correlation
+            corr_x = center_w + x_shift
+
+            # Check bounds
+            if (0 <= corr_y < cross_corr.shape[0] and
+                0 <= corr_x < cross_corr.shape[1]):
+
+                correlation = cross_corr[corr_y, corr_x]
+
+                # Calculate RMSE by applying the shift and comparing overlapping regions
+                rmse = calculate_rmse_for_shift(img1_float, img2_float, x_shift, y_shift)
+
+                correlations.append(correlation)
+                rmse_values.append(rmse)
+                shift_coords.append((x_shift, y_shift))
+
+    # Normalize metrics for combination
+    if len(correlations) > 0:
+        correlations = np.array(correlations)
+        rmse_values = np.array(rmse_values)
+
+        # Normalize correlation to [0, 1]
+        if correlations.max() > correlations.min():
+            norm_correlation = (correlations - correlations.min()) / (correlations.max() - correlations.min())
+        else:
+            norm_correlation = np.ones_like(correlations)
+
+        # Normalize RMSE to [0, 1] and invert (lower RMSE is better)
+        if rmse_values.max() > rmse_values.min():
+            norm_rmse_inverted = 1.0 - (rmse_values - rmse_values.min()) / (rmse_values.max() - rmse_values.min())
+        else:
+            norm_rmse_inverted = np.ones_like(rmse_values)
+
+        # Combined score: weighted combination
+        alpha = 0.7  # Weight for correlation
+        beta = 0.3   # Weight for RMSE
+        combined_scores = alpha * norm_correlation + beta * norm_rmse_inverted
+
+        # Find best shift
+        best_idx = np.argmax(combined_scores)
+        best_x_shift, best_y_shift = shift_coords[best_idx]
+        best_correlation = correlations[best_idx]
+        best_rmse = rmse_values[best_idx]
+        best_combined_score = combined_scores[best_idx]
+
+        print(f"    Best match: X={best_x_shift}, Y={best_y_shift}")
+        print(f"    Correlation={best_correlation:.4f}, RMSE={best_rmse:.2f}, Combined={best_combined_score:.4f}")
+
+        return best_x_shift, best_y_shift, best_correlation, best_rmse, best_combined_score
+    else:
+        print(f"    No valid shifts found in specified range!")
+        return 0, 0, 0, float('inf'), 0
+
+
+def calculate_rmse_for_shift(img1, img2, x_shift, y_shift):
+    """
+    Calculate RMSE for a specific shift between two images.
+
+    Args:
+        img1 (numpy.ndarray): Reference image
+        img2 (numpy.ndarray): Image to be shifted
+        x_shift (int): X-axis shift
+        y_shift (int): Y-axis shift
+
+    Returns:
+        float: RMSE value
+    """
+    # Calculate overlapping regions when img2 is shifted by (x_shift, y_shift)
+    y_overlap_start = max(0, -y_shift)
+    y_overlap_end = min(img1.shape[0], img2.shape[0] - y_shift)
+    x_overlap_start = max(0, x_shift)
+    x_overlap_end = min(img1.shape[1], img2.shape[1] + x_shift)
+
+    # Extract regions from img1 (reference frame)
+    y1_start = y_overlap_start
+    y1_end = y_overlap_end
+    x1_start = x_overlap_start
+    x1_end = x_overlap_end
+
+    # Extract regions from img2 (shifted frame, UP by y_shift)
+    y2_start = y_overlap_start + y_shift
+    y2_end = y_overlap_end + y_shift
+    x2_start = x_overlap_start - x_shift
+    x2_end = x_overlap_end - x_shift
+
+    # Extract overlapping regions
+    if (y1_end > y1_start and x1_end > x1_start and
+        y2_end > y2_start and x2_end > x2_start):
+
+        region1 = img1[y1_start:y1_end, x1_start:x1_end]
+        region2 = img2[y2_start:y2_end, x2_start:x2_end]
+
+        # Ensure regions have the same size
+        min_h = min(region1.shape[0], region2.shape[0])
+        min_w = min(region1.shape[1], region2.shape[1])
+
+        region1 = region1[:min_h, :min_w]
+        region2 = region2[:min_h, :min_w]
+
+        # Calculate RMSE if regions are valid
+        if region1.size > 0 and region2.size > 0:
+            rmse = np.sqrt(np.mean((region1 - region2) ** 2))
+            return rmse
+
+    return float('inf')  # Return infinite RMSE if no valid overlap
 
 
 def calculate_autocorrelation_with_rmse(img1, img2, x_range=(-6, 6), y_range=(26, 39), exclude_edge_x=True, edge_x_width=32):
@@ -219,22 +401,32 @@ def calculate_shift_for_pair(args):
     Calculate shift between a pair of images. Designed for parallel processing.
 
     Args:
-        args: Tuple containing (band_data_1, band_data_2, i, band_name, x_range, y_range, exclude_edge_x, edge_x_width)
+        args: Tuple containing (band_data_1, band_data_2, i, band_name, x_range, y_range, exclude_edge_x, edge_x_width, use_fft)
 
     Returns:
         tuple: (i, band_name, x_shift, y_shift, correlation, rmse, combined_score)
     """
-    band_data_1, band_data_2, i, band_name, x_range, y_range, exclude_edge_x, edge_x_width = args
+    band_data_1, band_data_2, i, band_name, x_range, y_range, exclude_edge_x, edge_x_width, use_fft = args
 
-    print(f"  Calculating shift between image {i+1} and {i+2} for {band_name} band (parallel worker)")
+    method_str = "FFT-based" if use_fft else "pixel-shift"
+    print(f"  Calculating {method_str} shift between image {i+1} and {i+2} for {band_name} band (parallel worker)")
 
-    x_shift, y_shift, correlation, rmse, combined_score = calculate_autocorrelation_with_rmse(
-        band_data_1, band_data_2,
-        x_range=x_range,
-        y_range=y_range,
-        exclude_edge_x=exclude_edge_x,
-        edge_x_width=edge_x_width
-    )
+    if use_fft:
+        x_shift, y_shift, correlation, rmse, combined_score = calculate_autocorrelation_with_rmse_fft(
+            band_data_1, band_data_2,
+            x_range=x_range,
+            y_range=y_range,
+            exclude_edge_x=exclude_edge_x,
+            edge_x_width=edge_x_width
+        )
+    else:
+        x_shift, y_shift, correlation, rmse, combined_score = calculate_autocorrelation_with_rmse(
+            band_data_1, band_data_2,
+            x_range=x_range,
+            y_range=y_range,
+            exclude_edge_x=exclude_edge_x,
+            edge_x_width=edge_x_width
+        )
 
     return (i, band_name, x_shift, y_shift, correlation, rmse, combined_score)
 
@@ -560,6 +752,8 @@ def main():
                        help='Starting image index (0-based) for pushbroom processing (default: 0)')
     parser.add_argument('--per-band-shifts', action='store_true', default=False,
                        help='Calculate shifts per band using each band\'s autocorrelation instead of using green_pan for all bands (default: False)')
+    parser.add_argument('--fft', action='store_true', default=False,
+                       help='Use 2D FFT-based cross-correlation instead of pixel-shift method (default: False)')
 
     args = parser.parse_args()
     
@@ -570,6 +764,7 @@ def main():
     edge_x_width = args.edge_x_width
     start_image = args.start_image
     per_band_shifts = args.per_band_shifts
+    use_fft = args.fft
     
     # Path to the dataset
     dataset_path = Path("IPS_Dataset")
@@ -586,7 +781,9 @@ def main():
         return
     
     print(f"Found {len(tiff_files)} TIFF files")
+    method_str = "FFT-based" if use_fft else "pixel-shift"
     print(f"Configuration: {fps_pixels} pixels per second, processing {num_images} images, starting from index {start_image}")
+    print(f"Cross-correlation method: {method_str}")
 
     # Validate start_image parameter
     if start_image < 0:
@@ -649,7 +846,7 @@ def main():
                 for i in range(len(band_data_lists[band_name]) - 1):
                     band_data_1 = band_data_lists[band_name][i]
                     band_data_2 = band_data_lists[band_name][i+1]
-                    args = (band_data_1, band_data_2, i, band_name, (-7, 7), (20, 39), exclude_edge_x, edge_x_width)
+                    args = (band_data_1, band_data_2, i, band_name, (-7, 7), (20, 39), exclude_edge_x, edge_x_width, use_fft)
                     shift_args.append(args)
 
                 # Determine number of processes to use (don't exceed number of CPU cores)
@@ -703,7 +900,7 @@ def main():
             for i in range(len(band_data_lists['green_pan']) - 1):
                 green_pan_1 = band_data_lists['green_pan'][i]
                 green_pan_2 = band_data_lists['green_pan'][i+1]
-                args = (green_pan_1, green_pan_2, i, 'green_pan', (-7, 7), (20, 39), exclude_edge_x, edge_x_width)
+                args = (green_pan_1, green_pan_2, i, 'green_pan', (-7, 7), (20, 39), exclude_edge_x, edge_x_width, use_fft)
                 shift_args.append(args)
 
             # Determine number of processes to use (don't exceed number of CPU cores)
@@ -747,7 +944,8 @@ def main():
             if pushbroom is not None:
                 # Save aligned pushbroom image
                 shift_type = "perband" if per_band_shifts else "greenpan"
-                output_path = f"pushbroom_aligned_{band_name}_{actual_num_images}images_start{start_image}_{fps_pixels}pxsec_{shift_type}.tiff"
+                method_suffix = "fft" if use_fft else "pixel"
+                output_path = f"pushbroom_aligned_{band_name}_{actual_num_images}images_start{start_image}_{fps_pixels}pxsec_{shift_type}_{method_suffix}.tiff"
                 save_10bit_tiff(pushbroom, output_path)
         else:
             print(f"No data available for {band_name} band")
