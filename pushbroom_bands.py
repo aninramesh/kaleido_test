@@ -660,9 +660,12 @@ def create_shift_metrics_plot(shifts_list, correlations_list, rmse_list, combine
         # Ensure we always include the last tick if it's not already included
         if pair_indices[-1] not in x_ticks:
             x_ticks.append(pair_indices[-1])
+        # For annotations, use the same indices as x_ticks
+        annotation_indices = [i for i in range(num_pairs) if pair_indices[i] in x_ticks]
     else:
-        # For 10 or fewer pairs, show all ticks
+        # For 10 or fewer pairs, show all ticks and annotations
         x_ticks = pair_indices
+        annotation_indices = list(range(num_pairs))
     
     # Plot 1: X and Y shifts (individual and cumulative X)
     ax1.plot(pair_indices, x_shifts, 'bo-', label='X Shift (individual)', linewidth=2, markersize=8)
@@ -684,9 +687,9 @@ def create_shift_metrics_plot(shifts_list, correlations_list, rmse_list, combine
     ax2.set_xticks(x_ticks)
     ax2.set_ylim([0.9, 1])
     
-    # Add correlation values as text annotations
-    for i, corr in enumerate(correlations):
-        ax2.annotate(f'{corr:.3f}', (pair_indices[i], corr), 
+    # Add correlation values as text annotations (smart spacing)
+    for i in annotation_indices:
+        ax2.annotate(f'{correlations[i]:.3f}', (pair_indices[i], correlations[i]),
                     textcoords="offset points", xytext=(0,10), ha='center')
     
     # Plot 3: Normalized RMSE (inverted, so higher is better)
@@ -698,9 +701,9 @@ def create_shift_metrics_plot(shifts_list, correlations_list, rmse_list, combine
     ax3.set_xticks(x_ticks)
     ax3.set_ylim([0, 1])
     
-    # Add RMSE values as text annotations
-    for i, (norm_rmse, raw_rmse) in enumerate(zip(normalized_rmse, rmse_values)):
-        ax3.annotate(f'{raw_rmse:.1f}', (pair_indices[i], norm_rmse), 
+    # Add RMSE values as text annotations (smart spacing)
+    for i in annotation_indices:
+        ax3.annotate(f'{rmse_values[i]:.1f}', (pair_indices[i], normalized_rmse[i]),
                     textcoords="offset points", xytext=(0,10), ha='center')
     
     # Plot 4: Combined scores
@@ -712,9 +715,9 @@ def create_shift_metrics_plot(shifts_list, correlations_list, rmse_list, combine
     ax4.set_xticks(x_ticks)
     ax4.set_ylim([0.9, 1])
     
-    # Add combined scores as text annotations
-    for i, score in enumerate(combined_scores):
-        ax4.annotate(f'{score:.3f}', (pair_indices[i], score), 
+    # Add combined scores as text annotations (smart spacing)
+    for i in annotation_indices:
+        ax4.annotate(f'{combined_scores[i]:.3f}', (pair_indices[i], combined_scores[i]),
                     textcoords="offset points", xytext=(0,10), ha='center')
     
     plt.tight_layout()
