@@ -520,6 +520,96 @@ def create_snr_violin_plot(snr_results, output_filename="snr_violin_homogeneous.
     print(f"SNR violin plot saved: {output_filename}")
     plt.show()
 
+def create_snr_spatial_maps(snr_results, output_filename="snr_spatial_maps.png"):
+    """
+    Create 2D spatial maps showing SNR distribution across the image for each band.
+    """
+    bands = list(snr_results.keys())
+    if not bands:
+        return
+
+    # Determine image dimensions from the first band's regions
+    first_band = bands[0]
+    if 'homogeneous_regions' not in snr_results[first_band] or not snr_results[first_band]['homogeneous_regions']:
+        print("No homogeneous regions data available for spatial mapping")
+        return
+
+    # Get image dimensions from bounding boxes
+    all_regions = snr_results[first_band]['homogeneous_regions']
+    max_x = max(region['bbox'][2] for region in all_regions)  # x2
+    max_y = max(region['bbox'][3] for region in all_regions)  # y2
+
+    print(f"Creating spatial SNR maps with dimensions: {max_x} x {max_y}")
+
+    # Create subplots for each band
+    n_bands = len(bands)
+    cols = 3 if n_bands > 2 else n_bands
+    rows = (n_bands + cols - 1) // cols
+
+    fig, axes = plt.subplots(rows, cols, figsize=(5*cols, 4*rows))
+    if n_bands == 1:
+        axes = [axes]
+    elif rows == 1:
+        axes = axes.reshape(1, -1)
+
+    fig.suptitle('Spatial SNR Distribution Maps\nColor represents SNR values from homogeneous regions',
+                 fontsize=16, fontweight='bold')
+
+    for i, band in enumerate(bands):
+        row = i // cols
+        col = i % cols
+        ax = axes[row, col] if rows > 1 else axes[col]
+
+        # Get regions and SNR data for this band
+        regions = snr_results[band]['homogeneous_regions']
+        if not regions:
+            ax.text(0.5, 0.5, f'No data for {band}', ha='center', va='center', transform=ax.transAxes)
+            ax.set_title(f'{band.title()} Band')
+            continue
+
+        # Create SNR map
+        snr_map = np.full((max_y, max_x), np.nan)
+
+        for region in regions:
+            x1, y1, x2, y2 = region['bbox']
+            snr_val = region['snr']
+
+            # Fill the region with its SNR value
+            snr_map[y1:y2, x1:x2] = snr_val
+
+        # Create the plot
+        im = ax.imshow(snr_map, cmap='viridis', interpolation='nearest', aspect='auto')
+
+        # Add colorbar
+        cbar = plt.colorbar(im, ax=ax, shrink=0.8)
+        cbar.set_label('SNR', rotation=270, labelpad=15)
+
+        # Set title with statistics
+        mean_snr = snr_results[band]['snr']
+        region_count = len(regions)
+        ax.set_title(f'{band.title()} Band\nMean SNR: {mean_snr:.1f} | Regions: {region_count}')
+
+        # Set labels
+        ax.set_xlabel('X (pixels)')
+        ax.set_ylabel('Y (pixels)')
+
+        # Add grid
+        ax.grid(True, alpha=0.3)
+
+    # Hide unused subplots
+    for i in range(n_bands, rows * cols):
+        row = i // cols
+        col = i % cols
+        if rows > 1:
+            axes[row, col].set_visible(False)
+        else:
+            axes[col].set_visible(False)
+
+    plt.tight_layout()
+    plt.savefig(output_filename, dpi=300, bbox_inches='tight')
+    print(f"SNR spatial maps saved: {output_filename}")
+    plt.show()
+
 def main():
     """Main function for homogeneous region SNR analysis."""
     parser = argparse.ArgumentParser(description='SNR analysis using homogeneous regions')
@@ -621,10 +711,12 @@ def main():
     print(f"\n4. Creating SNR analysis plots...")
     create_snr_analysis_plot(original_snr_results, "snr_original_homogeneous.png")
     create_snr_violin_plot(original_snr_results, "snr_violin_homogeneous.png")
+    create_snr_spatial_maps(original_snr_results, "snr_spatial_maps.png")
 
     if normalized_snr_results:
         create_snr_analysis_plot(normalized_snr_results, "snr_normalized_homogeneous.png")
         create_snr_violin_plot(normalized_snr_results, "snr_violin_normalized.png")
+        create_snr_spatial_maps(normalized_snr_results, "snr_spatial_maps_normalized.png")
 
 if __name__ == "__main__":
     main()
