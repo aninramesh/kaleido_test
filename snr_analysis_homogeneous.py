@@ -256,7 +256,8 @@ def calculate_snr_from_homogeneous_regions(homogeneous_regions, method='median',
     return snr_stats
 
 def analyze_band_snr(image_data, band_name, detection_method='sliding_window', snr_method='pooled',
-                     window_size=32, stride=16, homogeneity_threshold=0.1, verbose=False):
+                     window_size=32, stride=16, homogeneity_threshold=0.1,
+                     predefined_regions=None, verbose=False):
     """
     Complete SNR analysis for a spectral band.
     """
@@ -264,18 +265,52 @@ def analyze_band_snr(image_data, band_name, detection_method='sliding_window', s
         print(f"\n  Analyzing {band_name} band SNR...")
         print(f"  Detection: {detection_method}, SNR calculation: {snr_method}")
 
-    # Detect homogeneous regions
-    if detection_method == 'sliding_window':
-        regions = detect_homogeneous_regions_sliding_window(image_data, window_size=window_size,
-                                                          stride=stride,
-                                                          homogeneity_threshold=homogeneity_threshold,
-                                                          verbose=verbose)
-    elif detection_method == 'clustering':
-        regions = detect_homogeneous_regions_clustering(image_data, window_size=window_size,
-                                                       homogeneity_threshold=homogeneity_threshold,
-                                                       verbose=verbose)
+    # Use predefined regions or detect new ones
+    if predefined_regions is not None:
+        if verbose:
+            print(f"    Using predefined regions from reference band...")
+            print(f"    Number of predefined regions: {len(predefined_regions)}")
+
+        # Apply the predefined region locations to this band's data
+        regions = []
+        for region in predefined_regions:
+            x1, y1, x2, y2 = region['bbox']
+            # Extract the same spatial region from current band
+            if x2 <= image_data.shape[1] and y2 <= image_data.shape[0]:
+                window = image_data[y1:y2, x1:x2]
+                valid_mask = window > 0
+                valid_pixels = window[valid_mask]
+
+                if len(valid_pixels) > 0:
+                    mean_val = np.mean(valid_pixels)
+                    std_val = np.std(valid_pixels)
+                    snr_val = mean_val / std_val if std_val > 0 else float('inf')
+                    cv_val = std_val / mean_val if mean_val > 0 else float('inf')
+
+                    regions.append({
+                        'mean': mean_val,
+                        'std': std_val,
+                        'snr': snr_val,
+                        'cv': cv_val,
+                        'bbox': (x1, y1, x2, y2),
+                        'pixel_count': len(valid_pixels)
+                    })
+
+        if verbose:
+            print(f"    Applied to {len(regions)} valid regions in {band_name} band")
     else:
-        raise ValueError(f"Unknown detection method: {detection_method}")
+        # Detect homogeneous regions normally
+        if detection_method == 'sliding_window':
+            regions = detect_homogeneous_regions_sliding_window(image_data, window_size=window_size,
+                                                              stride=stride,
+                                                              homogeneity_threshold=homogeneity_threshold,
+                                                              verbose=verbose)
+        elif detection_method == 'clustering':
+            regions = detect_homogeneous_regions_clustering(image_data, window_size=window_size,
+                                                           homogeneity_threshold=homogeneity_threshold,
+                                                           verbose=verbose)
+        else:
+            raise ValueError(f"Unknown detection method: {detection_method}")
 
     # Calculate SNR from homogeneous regions
     snr_stats = calculate_snr_from_homogeneous_regions(regions, method=snr_method, verbose=verbose)
@@ -452,7 +487,13 @@ def create_snr_violin_plot(snr_results, output_filename="snr_violin_homogeneous.
 
     for band in bands:
         if 'individual_snrs' in snr_results[band] and snr_results[band]['individual_snrs']:
-            snr_data.append(snr_results[band]['individual_snrs'])
+            # Remove outliers using 2nd and 98th percentiles
+            all_snrs = np.array(snr_results[band]['individual_snrs'])
+            p2 = np.percentile(all_snrs, 2)
+            p98 = np.percentile(all_snrs, 98)
+            filtered_snrs = all_snrs[(all_snrs >= p2) & (all_snrs <= p98)]
+
+            snr_data.append(filtered_snrs.tolist())
             band_labels.append(band)
 
     if not snr_data:
@@ -496,11 +537,11 @@ def create_snr_violin_plot(snr_results, output_filename="snr_violin_homogeneous.
     ax.set_xticklabels(band_labels, rotation=45)
     ax.set_xlabel('Spectral Bands')
     ax.set_ylabel('Signal-to-Noise Ratio')
-    ax.set_title('SNR Distribution of Homogeneous Regions\nViolin Plot with Individual Data Points',
+    ax.set_title('SNR Distribution of Homogeneous Regions\nViolin Plot (2nd-98th Percentile Range)',
                  fontsize=14, fontweight='bold')
     ax.grid(True, alpha=0.3)
 
-    # Add statistics text
+    # Add statistics text (filtered data)
     stats_text = []
     for i, (band, snrs) in enumerate(zip(band_labels, snr_data)):
         mean_snr = np.mean(snrs)
@@ -511,6 +552,7 @@ def create_snr_violin_plot(snr_results, output_filename="snr_violin_homogeneous.
 
     # Add text box with statistics
     textstr = '\n'.join(stats_text)
+    textstr += '\n(2nd-98th percentile range)'
     props = dict(boxstyle='round', facecolor='wheat', alpha=0.8)
     ax.text(0.02, 0.98, textstr, transform=ax.transAxes, fontsize=9,
             verticalalignment='top', bbox=props)
@@ -660,14 +702,42 @@ def main():
         print("No input files found!")
         return
 
-    # Analyze original images
+    # Analyze original images using green_pan as reference for homogeneous region detection
     print(f"\n1. Analyzing original images...")
+    print(f"   Using green_pan as reference band for homogeneous region detection...")
     original_snr_results = {}
 
+    # Step 1: Detect homogeneous regions using green_pan as reference
+    reference_regions = None
+    reference_band = 'green_pan'
+    if reference_band in band_files:
+        reference_file = band_files[reference_band]
+        reference_data = read_geotiff_10bit(reference_file)
+
+        print(f"   Detecting homogeneous regions from {reference_band} band...")
+        reference_snr_stats = analyze_band_snr(reference_data, reference_band, args.detection_method,
+                                             args.snr_method, args.window_size, args.stride,
+                                             args.threshold, predefined_regions=None, verbose=args.verbose)
+        original_snr_results[reference_band] = reference_snr_stats
+        reference_regions = reference_snr_stats['homogeneous_regions']
+
+        print(f"   Found {len(reference_regions)} homogeneous regions in {reference_band}")
+        print(f"   These regions will be applied to all other bands for consistent analysis...")
+
+        if args.visualize_regions:
+            create_region_visualization(reference_data, reference_regions, reference_band)
+    else:
+        print(f"   Warning: green_pan band not found, using individual detection for each band...")
+
+    # Step 2: Apply the reference regions to all other bands
     for band_name, file_path in band_files.items():
+        if reference_band in band_files and band_name == reference_band:
+            continue  # Already processed
+
         image_data = read_geotiff_10bit(file_path)
         snr_stats = analyze_band_snr(image_data, band_name, args.detection_method, args.snr_method,
-                                    args.window_size, args.stride, args.threshold, args.verbose)
+                                    args.window_size, args.stride, args.threshold,
+                                    predefined_regions=reference_regions, verbose=args.verbose)
         original_snr_results[band_name] = snr_stats
 
         if args.visualize_regions:

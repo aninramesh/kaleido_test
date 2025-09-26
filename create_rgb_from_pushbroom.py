@@ -388,27 +388,26 @@ def save_rgb_geotiff(rgb_image, output_path, transform=None, crs='EPSG:4326'):
 
     print(f"  Saved RGB GeoTIFF (10-bit): {output_path}")
 
-def save_individual_bands(red_band, green_band, blue_band, output_prefix, original_dtype=None):
+def save_individual_bands(bands_dict, output_prefix, original_dtype=None):
     """
-    Save individual R, G, B bands as separate TIFF files preserving original bit depth.
+    Save individual bands as separate TIFF files preserving original bit depth.
 
     Args:
-        red_band (numpy.ndarray): Red channel data (aligned and cropped)
-        green_band (numpy.ndarray): Green channel data (aligned and cropped)
-        blue_band (numpy.ndarray): Blue channel data (aligned and cropped)
+        bands_dict (dict): Dictionary of band_name -> band_data (aligned and cropped)
         output_prefix (str): Prefix for output filenames
         original_dtype (numpy.dtype, optional): Original data type to preserve bit depth
     """
+    if not bands_dict:
+        print("  No bands provided for saving")
+        return
+
     if original_dtype is None:
-        # Determine dtype from input data
-        original_dtype = red_band.dtype
+        # Determine dtype from first band
+        first_band = next(iter(bands_dict.values()))
+        original_dtype = first_band.dtype
 
     # Band names and data
-    bands_data = {
-        'red': red_band,
-        'green': green_band,
-        'blue': blue_band
-    }
+    bands_data = bands_dict
 
     for band_name, band_data in bands_data.items():
         output_path = f"{output_prefix}_{band_name}.tiff"
@@ -451,14 +450,24 @@ def main():
                        help='Apply contrast enhancement using percentile clipping (default: True)')
     parser.add_argument('--no-enhance-contrast', dest='enhance_contrast', action='store_false',
                        help='Disable contrast enhancement')
-    parser.add_argument('--red-shift', type=int, default=396,
+    parser.add_argument('--red-shift', type=int, default=659,
                        help='Pixels to shift red band down for alignment with blue (default: 396)')
-    parser.add_argument('--green-shift', type=int, default=612,
-                       help='Pixels to shift green band down for alignment with blue (default: 612)')
+    parser.add_argument('--green-shift', type=int, default=975,
+                       help='Pixels to shift green_pan band down for alignment with blue (default: 612)')
+    parser.add_argument('--red-edge-shift', type=int, default=314,
+                       help='Pixels to shift red_edge band down for alignment with blue (default: 288)')
+    parser.add_argument('--nir-shift', type=int, default=-292,
+                       help='Pixels to shift nir band down for alignment with blue (default: 108)')
+    parser.add_argument('--blue-shift', type=int, default=0,
+                       help='Pixels to shift blue band down (reference band, default: 0)')
     parser.add_argument('--red-x-shift', type=int, default=0,
                        help='Pixels to shift red band horizontally (positive=right, negative=left, default: 0)')
     parser.add_argument('--green-x-shift', type=int, default=0,
-                       help='Pixels to shift green band horizontally (positive=right, negative=left, default: 0)')
+                       help='Pixels to shift green_pan band horizontally (positive=right, negative=left, default: 0)')
+    parser.add_argument('--red-edge-x-shift', type=int, default=0,
+                       help='Pixels to shift red_edge band horizontally (positive=right, negative=left, default: 0)')
+    parser.add_argument('--nir-x-shift', type=int, default=0,
+                       help='Pixels to shift nir band horizontally (positive=right, negative=left, default: 0)')
     parser.add_argument('--blue-x-shift', type=int, default=0,
                        help='Pixels to shift blue band horizontally (positive=right, negative=left, default: 0)')
     parser.add_argument('--rgb-align-x-range', type=int, nargs=2, default=[-4, 4],
@@ -596,8 +605,81 @@ def main():
         print(f"    Manual alignment result: {min_height}x{min_width}")
         return red_cropped, green_cropped, blue_cropped
 
-    # Apply manual shifts first
-    manually_shifted_red, manually_shifted_green, manually_shifted_blue = apply_manual_shifts_to_bands(red_band, green_band, blue_band)
+    # Apply manual shifts to all bands
+    print(f"\nApplying manual shifts to all bands...")
+
+    # Define band shift parameters
+    band_shifts = {
+        'red': {'y_shift': args.red_shift, 'x_shift': args.red_x_shift},
+        'green_pan': {'y_shift': args.green_shift, 'x_shift': args.green_x_shift},
+        'blue': {'y_shift': args.blue_shift, 'x_shift': args.blue_x_shift},
+        'red_edge': {'y_shift': args.red_edge_shift, 'x_shift': args.red_edge_x_shift},
+        'nir': {'y_shift': args.nir_shift, 'x_shift': args.nir_x_shift}
+    }
+
+    def apply_band_shifts(all_bands_data, shift_params):
+        """Apply Y and X shifts to all bands"""
+        aligned_bands = {}
+
+        # Apply Y-shifts (vertical) - handle negative shifts properly
+        def apply_y_shift(band_data, y_shift):
+            if y_shift == 0:
+                return band_data
+            elif y_shift > 0:
+                return np.pad(band_data, ((y_shift, 0), (0, 0)), mode='constant', constant_values=0)
+            else:
+                abs_shift = -y_shift
+                if abs_shift >= band_data.shape[0]:
+                    return np.zeros_like(band_data)
+                else:
+                    cropped = band_data[abs_shift:, :]
+                    return np.pad(cropped, ((0, abs_shift), (0, 0)), mode='constant', constant_values=0)
+
+        def apply_x_shift(band_data, x_shift):
+            if x_shift == 0:
+                return band_data
+            elif x_shift > 0:
+                return np.pad(band_data, ((0, 0), (x_shift, 0)), mode='constant', constant_values=0)
+            else:
+                abs_shift = -x_shift
+                if abs_shift >= band_data.shape[1]:
+                    return np.zeros_like(band_data)
+                else:
+                    cropped = band_data[:, abs_shift:]
+                    return np.pad(cropped, ((0, 0), (0, abs_shift)), mode='constant', constant_values=0)
+
+        for band_name, band_data in all_bands_data.items():
+            if band_name in shift_params:
+                y_shift = shift_params[band_name]['y_shift']
+                x_shift = shift_params[band_name]['x_shift']
+
+                print(f"  {band_name}: Y-shift={y_shift}, X-shift={x_shift}")
+
+                # Apply Y-shift first, then X-shift
+                y_shifted = apply_y_shift(band_data, y_shift)
+                xy_shifted = apply_x_shift(y_shifted, x_shift)
+                aligned_bands[band_name] = xy_shifted
+            else:
+                aligned_bands[band_name] = band_data
+
+        # Find minimum dimensions across all bands
+        min_height = min(band.shape[0] for band in aligned_bands.values())
+        min_width = min(band.shape[1] for band in aligned_bands.values())
+
+        # Crop all bands to same size
+        for band_name in aligned_bands:
+            aligned_bands[band_name] = aligned_bands[band_name][:min_height, :min_width]
+
+        print(f"  All bands aligned to: {min_height}x{min_width}")
+        return aligned_bands
+
+    # Apply shifts to all bands
+    aligned_bands = apply_band_shifts(pushbroom_data, band_shifts)
+
+    # Extract RGB bands from aligned data
+    manually_shifted_red = aligned_bands[args.bands_to_use[0]]
+    manually_shifted_green = aligned_bands[args.bands_to_use[1]]
+    manually_shifted_blue = aligned_bands[args.bands_to_use[2]]
 
     # Stage 2: Apply RGB autocorrelation alignment (fine-tuning)
     if not args.disable_rgb_align:
@@ -705,28 +787,31 @@ def main():
     output_filename_tiff = f"pushbroom_rgb{contrast_suffix}.tiff"
     save_rgb_geotiff(rgb_image, output_filename_tiff)
 
-    # Save individual RGB bands with original bit depth
-    print(f"\nSaving individual RGB bands...")
+    # Save individual aligned bands with original bit depth
+    print(f"\nSaving all individual aligned bands...")
 
+    # Determine the valid region based on RGB overlap
     if not np.any(valid_rows) or not np.any(valid_cols):
-        # Use full bands if no valid region found
-        individual_red = final_red_band
-        individual_green = final_green_band
-        individual_blue = final_blue_band
+        # Use full aligned bands if no valid region found
+        final_aligned_bands = aligned_bands
     else:
-        # Use cropped valid regions (same as used for RGB image)
-        individual_red = final_red_band[row_start:row_end, col_start:col_end]
-        individual_green = final_green_band[row_start:row_end, col_start:col_end]
-        individual_blue = final_blue_band[row_start:row_end, col_start:col_end]
+        # Crop all aligned bands to the same valid region as used for RGB image
+        final_aligned_bands = {}
+        for band_name, band_data in aligned_bands.items():
+            final_aligned_bands[band_name] = band_data[row_start:row_end, col_start:col_end]
 
     output_prefix = f"pushbroom_individual{contrast_suffix}"
-    save_individual_bands(individual_red, individual_green, individual_blue,
-                         output_prefix, original_red_dtype)
+    save_individual_bands(final_aligned_bands, output_prefix, original_red_dtype)
 
     print(f"\nRGB creation complete!")
     print(f"PNG output saved as: {output_filename_png}")
     print(f"GeoTIFF output saved as: {output_filename_tiff}")
-    print(f"Individual bands saved as: {output_prefix}_red.tiff, {output_prefix}_green.tiff, {output_prefix}_blue.tiff")
+
+    # Print list of all saved individual band files
+    band_files = [f"{output_prefix}_{band_name}.tiff" for band_name in final_aligned_bands.keys()]
+    print(f"Individual aligned bands saved as:")
+    for band_file in band_files:
+        print(f"  {band_file}")
 
 if __name__ == "__main__":
     main()
