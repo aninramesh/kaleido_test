@@ -577,8 +577,17 @@ def create_snr_spatial_maps(snr_results, output_filename="snr_spatial_maps.png")
             # Fill the region with its SNR value
             snr_map[y1:y2, x1:x2] = snr_val
 
-        # Create the plot
-        im = ax.imshow(snr_map, cmap='viridis', interpolation='nearest', aspect='auto')
+        # Calculate 5th and 95th percentiles for colormap limits
+        valid_snr_values = snr_map[~np.isnan(snr_map)]
+        if len(valid_snr_values) > 0:
+            vmin = np.percentile(valid_snr_values, 5)
+            vmax = np.percentile(valid_snr_values, 95)
+        else:
+            vmin, vmax = None, None
+
+        # Create the plot with percentile-based colormap limits
+        im = ax.imshow(snr_map, cmap='viridis', interpolation='nearest', aspect='auto',
+                      vmin=vmin, vmax=vmax)
 
         # Add colorbar
         cbar = plt.colorbar(im, ax=ax, shrink=0.8)
@@ -633,7 +642,7 @@ def main():
     # Find input files
     current_dir = Path('.')
     band_files = {}
-    expected_bands = ['green', 'nir', 'blue', 'red_edge', 'red']
+    expected_bands = ['green_pan', 'nir', 'blue', 'red_edge', 'red']
 
     print(f"Signal-to-Noise Ratio Analysis from Homogeneous Regions")
     print(f"Detection method: {args.detection_method}")
