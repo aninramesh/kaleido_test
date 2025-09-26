@@ -32,7 +32,7 @@ def read_pushbroom_tiff(file_path):
         print(f"  Error loading {file_path}: {e}")
         return None
 
-def extract_rgb_bands(pushbroom_data, band_ranges):
+def extract_rgb_bands(pushbroom_data, band_ranges, bands_to_use=['red', 'green_pan', 'blue']):
     """
     Extract RGB bands from pushbroom data using band range information.
 
@@ -44,9 +44,9 @@ def extract_rgb_bands(pushbroom_data, band_ranges):
         tuple: (red_band, green_band, blue_band) as numpy arrays
     """
     # Use red, green_pan (as green), and blue bands for RGB
-    red_band = pushbroom_data.get('red')
-    green_band = pushbroom_data.get('green_pan')  # Using green_pan as green channel
-    blue_band = pushbroom_data.get('blue')
+    red_band = pushbroom_data.get(bands_to_use[0])
+    green_band = pushbroom_data.get(bands_to_use[1])  # Using green_pan as green channel
+    blue_band = pushbroom_data.get(bands_to_use[2])
 
     if red_band is None or green_band is None or blue_band is None:
         missing = []
@@ -388,6 +388,58 @@ def save_rgb_geotiff(rgb_image, output_path, transform=None, crs='EPSG:4326'):
 
     print(f"  Saved RGB GeoTIFF (10-bit): {output_path}")
 
+def save_individual_bands(red_band, green_band, blue_band, output_prefix, original_dtype=None):
+    """
+    Save individual R, G, B bands as separate TIFF files preserving original bit depth.
+
+    Args:
+        red_band (numpy.ndarray): Red channel data (aligned and cropped)
+        green_band (numpy.ndarray): Green channel data (aligned and cropped)
+        blue_band (numpy.ndarray): Blue channel data (aligned and cropped)
+        output_prefix (str): Prefix for output filenames
+        original_dtype (numpy.dtype, optional): Original data type to preserve bit depth
+    """
+    if original_dtype is None:
+        # Determine dtype from input data
+        original_dtype = red_band.dtype
+
+    # Band names and data
+    bands_data = {
+        'red': red_band,
+        'green': green_band,
+        'blue': blue_band
+    }
+
+    for band_name, band_data in bands_data.items():
+        output_path = f"{output_prefix}_{band_name}.tiff"
+
+        # Preserve original data type and range
+        if original_dtype != band_data.dtype:
+            # Convert back to original dtype if needed
+            if np.issubdtype(original_dtype, np.integer):
+                # For integer types, preserve the data as-is
+                band_output = band_data.astype(original_dtype)
+            else:
+                # For float types, preserve the data as-is
+                band_output = band_data.astype(original_dtype)
+        else:
+            band_output = band_data
+
+        # Save as single-band TIFF
+        with rasterio.open(
+            output_path,
+            'w',
+            driver='GTiff',
+            height=band_output.shape[0],
+            width=band_output.shape[1],
+            count=1,
+            dtype=band_output.dtype,
+            compress='lzw'
+        ) as dst:
+            dst.write(band_output, 1)
+
+        print(f"  Saved {band_name} band: {output_path} (dtype: {band_output.dtype}, shape: {band_output.shape})")
+
 def main():
     """Main function to create RGB images from pushbroom TIFF files."""
 
@@ -415,6 +467,8 @@ def main():
                        help='Y-axis range for RGB autocorrelation alignment (default: -4 4)')
     parser.add_argument('--disable-rgb-align', action='store_true', default=False,
                        help='Disable automatic RGB channel alignment using autocorrelation (default: False)')
+    parser.add_argument('--bands-to-use', type=str, nargs=3, default=['red', 'green_pan', 'blue'],
+                       help='Specify which bands to use for R, G, B channels respectively (default: red green_pan blue), available options: red, green, green_pan, blue, nir, red_edge')
 
     args = parser.parse_args()
 
@@ -457,7 +511,7 @@ def main():
         print(f"  {band_name}: {file_path.name}")
 
     # Check if we have the required bands for RGB
-    required_bands = ['red', 'green_pan', 'blue']
+    required_bands = ['red', 'green_pan', 'blue', 'red_edge', 'nir']
     missing_bands = [band for band in required_bands if band not in band_files]
     if missing_bands:
         print(f"Error: Missing required bands for RGB: {missing_bands}")
@@ -478,7 +532,13 @@ def main():
 
     # Extract RGB bands
     print(f"\nExtracting RGB bands...")
-    red_band, green_band, blue_band = extract_rgb_bands(pushbroom_data, band_ranges)
+    print(f"  Bands to use for RGB: R={args.bands_to_use[0]}, G={args.bands_to_use[1]}, B={args.bands_to_use[2]}")
+    red_band, green_band, blue_band = extract_rgb_bands(pushbroom_data, band_ranges, bands_to_use=args.bands_to_use)
+
+    # Store original data types for individual band saving
+    original_red_dtype = red_band.dtype
+    original_green_dtype = green_band.dtype
+    original_blue_dtype = blue_band.dtype
 
     # Stage 1: Apply manual shifts first (coarse positioning)
     print(f"\nStage 1: Applying manual shifts for coarse band positioning...")
@@ -489,9 +549,22 @@ def main():
         """Apply manual Y and X shifts to get roughly aligned bands"""
         print(f"  Applying manual Y-shifts...")
 
-        # Apply Y-shifts (vertical) - same logic as in create_rgb_image
-        red_y_shifted = np.pad(red_band, ((args.red_shift, 0), (0, 0)), mode='constant', constant_values=0)
-        green_y_shifted = np.pad(green_band, ((args.green_shift, 0), (0, 0)), mode='constant', constant_values=0)
+        # Apply Y-shifts (vertical) - handle negative shifts properly
+        def apply_y_shift(band_data, y_shift):
+            if y_shift == 0:
+                return band_data
+            elif y_shift > 0:
+                return np.pad(band_data, ((y_shift, 0), (0, 0)), mode='constant', constant_values=0)
+            else:
+                abs_shift = -y_shift
+                if abs_shift >= band_data.shape[0]:
+                    return np.zeros_like(band_data)
+                else:
+                    cropped = band_data[abs_shift:, :]
+                    return np.pad(cropped, ((0, abs_shift), (0, 0)), mode='constant', constant_values=0)
+
+        red_y_shifted = apply_y_shift(red_band, args.red_shift)
+        green_y_shifted = apply_y_shift(green_band, args.green_shift)
         blue_y_shifted = blue_band  # Blue is reference for Y
 
         # Apply manual X-shifts if any
@@ -632,9 +705,28 @@ def main():
     output_filename_tiff = f"pushbroom_rgb{contrast_suffix}.tiff"
     save_rgb_geotiff(rgb_image, output_filename_tiff)
 
+    # Save individual RGB bands with original bit depth
+    print(f"\nSaving individual RGB bands...")
+
+    if not np.any(valid_rows) or not np.any(valid_cols):
+        # Use full bands if no valid region found
+        individual_red = final_red_band
+        individual_green = final_green_band
+        individual_blue = final_blue_band
+    else:
+        # Use cropped valid regions (same as used for RGB image)
+        individual_red = final_red_band[row_start:row_end, col_start:col_end]
+        individual_green = final_green_band[row_start:row_end, col_start:col_end]
+        individual_blue = final_blue_band[row_start:row_end, col_start:col_end]
+
+    output_prefix = f"pushbroom_individual{contrast_suffix}"
+    save_individual_bands(individual_red, individual_green, individual_blue,
+                         output_prefix, original_red_dtype)
+
     print(f"\nRGB creation complete!")
     print(f"PNG output saved as: {output_filename_png}")
     print(f"GeoTIFF output saved as: {output_filename_tiff}")
+    print(f"Individual bands saved as: {output_prefix}_red.tiff, {output_prefix}_green.tiff, {output_prefix}_blue.tiff")
 
 if __name__ == "__main__":
     main()
